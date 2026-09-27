@@ -1002,7 +1002,7 @@ async def generate_poll_content(
 1. question: вопрос опроса — СТРОГО до 300 символов! Не повторяй в вопросе весь анамнез (он должен быть в case_intro).
 2. options: от 2 до 6 вариантов ответа. Длина каждого варианта — СТРОГО до 100 символов! Варианты должны быть клинически реалистичными.
 3. explanation_brief: СТРОГО до 200 символов! Короткий, практический, резкий вердикт для лампочки Telegram.
-4. Никаких шаблонных общих фраз — только строгая профессиональная терминология практикующих клиницистов (МТА, Ti-Base, силер, коффердам, C-factor, проба Вальсальвы, торк, уступ chamфер и т.д.).
+4. Никаких шаблонных общих фраз — только строгая профессиональная терминология практикующих клиницистов (МТА, Ti-Base, коффердам, C-factor, торк, уступ chamфер и т.д.).
 5. КАТЕГОРИЧЕСКИЙ ЗАПРЕТ НА КРИНЖ, ПСЕВДОЮМОР И БЫТОВЫЕ АНАЛОГИИ:
    - СТРОГО ЗАПРЕЩЕНЫ любые сравнения со сферой услуг и бытом (официанты, таксисты, сантехники, домашние хлопоты).
    - СТРОГО ЗАПРЕЩЕН петросянский юмор, стендап, каламбуры, сарказм и панибратство.
@@ -1018,6 +1018,13 @@ async def generate_poll_content(
 8. ПРАКТИЧЕСКАЯ КОНКУРЕНТНОСТЬ ВАРИАНТОВ (НИКАКИХ ГЛУПЫХ ОТВЕТОВ):
    - Все варианты ответов должны быть реалистичными тактиками или конкурирующими протоколами, которые реально применяются на практике разными врачами.
    - Неправильные варианты должны отражать распространенные клинические ошибки или компромиссные школы, а не очевидный абсурд.
+9. АБСОЛЮТНЫЙ ЗАПРЕТ НА МЕЖСЕКЦИОННЫЕ ГАЛЛЮЦИНАЦИИ (ДИСЦИПЛИНАРНАЯ ЧИСТОТА):
+   - ЗАПРЕЩЕНО применять эндодонтический силер (AH Plus, Sealapex, биокерамический силер) в контексте фиксации коронок или ортопедического цементирования. Силер — исключительно для пломбирования корневых каналов.
+   - ЗАПРЕЩЕНО упоминать пробу Вальсальвы вне контекста ороантрального сообщения/перфорации дна верхнечелюстной пазухи. В вопросах по фиксации, ортодонтии, препарированию — это ГАЛЛЮЦИНАЦИЯ.
+   - ЗАПРЕЩЕНО использовать ортодонтические микроимплантные абатменты в контексте временной фиксации несъёмных протезов.
+   - ЗАПРЕЩЕНО придумывать несуществующие диагностические протоколы: КЛКТ "для проверки герметичности цемента", ПЦР слюны как рутинная диагностика кариеса, "лазерная полимеризация МТА" и т.п.
+   - ЗАПРЕЩЕНО смешивать в одном вопросе терминологию разных дисциплин, если тема принадлежит только одной из них.
+   - Если категория — ортопедия: пиши только ортопедическую терминологию (цинк-фосфат, СИЦ, смоляной цемент, культевая вкладка, торк абатмента). Если эндодонтия — только эндодонтическую. Строго по дисциплине.
 
 ВЫДАЙ СТРОГО JSON БЕЗ MARKDOWN РАЗМЕТКИ, БЕЗ СЛОВА ```json:
 {{
@@ -1056,6 +1063,104 @@ async def generate_poll_content(
     except Exception as parse_err:
         logger.warning("Failed to parse poll JSON from LLM: %s", parse_err)
         return None
+
+
+# ==============================================================================
+# ШАГ 3.5: КЛИНИЧЕСКИЙ РЕЦЕНЗЕНТ (QUALITY GATE)
+# ==============================================================================
+
+async def review_poll_quality(
+    payload: PollPayload,
+    llm_caller: Callable,
+    timeout: float = 25.0
+) -> bool:
+    """
+    Шаг 3.5 пайплайна — клинический контроль качества.
+
+    Выполняет независимый LLM-вызов для проверки сгенерированного опроса
+    на галлюцинации, межсекционные ошибки и структурные дефекты.
+
+    Returns:
+        True  — опрос прошёл проверку, можно публиковать.
+        False — обнаружены дефекты, нужен фолбэк.
+
+    Fail-open: при LLM timeout / parse error возвращает True
+    (не блокируем публикацию из-за недоступности рецензента).
+    """
+    options_text = "\n".join(
+        f"  [{i}] {opt}" for i, opt in enumerate(payload.options)
+    )
+    correct_idx = payload.correct_option_id
+    correct_label = (
+        f"[{correct_idx}] {payload.options[correct_idx]}"
+        if correct_idx is not None and 0 <= correct_idx < len(payload.options)
+        else "нет (опрос мнений)"
+    )
+    category = payload.category or "неизвестно"
+    poll_type = payload.poll_type.value if payload.poll_type else "quiz"
+
+    review_prompt = f"""Ты — главный врач-редактор клинического телеграм-канала для практикующих стоматологов.
+Тебе на проверку поступил автоматически сгенерированный опрос. Твоя задача — выявить ГРУБЫЕ ОШИБКИ.
+
+КАТЕГОРИЯ ОПРОСА: {category}
+ТИП: {poll_type}
+ВОПРОС: {payload.question}
+ВАРИАНТЫ:
+{options_text}
+ПРАВИЛЬНЫЙ ОТВЕТ: {correct_label}
+КРАТКОЕ ОБЪЯСНЕНИЕ: {payload.explanation_brief or "(нет)"}
+
+КРИТЕРИИ ОТКЛОНЕНИЯ (хотя бы одно = REJECT):
+1. ДИСЦИПЛИНАРНАЯ ГАЛЛЮЦИНАЦИЯ: эндодонтический силер (AH Plus, Sealapex, биокерамика) упоминается в контексте ортопедической фиксации/цементирования коронок, когда категория — ортопедия/гнатология.
+2. ДИСЦИПЛИНАРНАЯ ГАЛЛЮЦИНАЦИЯ: проба Вальсальвы упоминается вне контекста ороантрального сообщения/перфорации дна гайморовой пазухи.
+3. ДИСЦИПЛИНАРНАЯ ГАЛЛЮЦИНАЦИЯ: ортодонтические микроимплантные абатменты упоминаются в контексте временной фиксации несъёмных протезов (не в ортодонтии).
+4. НЕСУЩЕСТВУЮЩИЙ ПРОТОКОЛ: КЛКТ «для проверки герметичности цемента», лазерная полимеризация МТА, ПЦР слюны как рутинный тест кариеса — любые выдуманные процедуры, которых нет в реальных клинических протоколах.
+5. МЕЖСЕКЦИОННЫЙ САЛАТ: в одном вопросе смешаны термины из 2–3 несвязанных дисциплин (ортопедия + эндодонтия + хирургия + ортодонтия одновременно), когда тема принадлежит только одной.
+6. СТРУКТУРНЫЙ ДЕФЕКТ: вопрос занимает 3 и более предложений (слишком многословен для опроса).
+7. КЛИНИЧЕСКИ НЕВЕРНЫЙ ПРАВИЛЬНЫЙ ОТВЕТ: для типа quiz — указанный correct_option_id явно противоречит действующим клиническим протоколам (AAE, ESE, ITI, SIGN, NICE).
+
+ЕСЛИ ДЕФЕКТОВ НЕТ — верни PASS. Не придирайся к мелочам (опечатки, стиль, выбор FDI номера).
+
+Ответь СТРОГО JSON (без markdown, без пояснений):
+{{"verdict": "PASS" или "REJECT", "defects": ["дефект 1", "дефект 2"] или []}}
+"""
+
+    status_ctx = {"kind": "poll_clinical_review"}
+    try:
+        resp, err = await _call_llm_adapter(llm_caller, review_prompt, status_ctx, timeout=timeout)
+    except Exception as exc:
+        logger.warning("Clinical reviewer call raised exception: %s — fail-open (PASS)", exc)
+        return True
+
+    if err or not resp or not getattr(resp, "text", None):
+        logger.warning("Clinical reviewer LLM unavailable (err=%s) — fail-open (PASS)", err)
+        return True
+
+    raw = resp.text.strip()
+    start = raw.find("{")
+    end = raw.rfind("}")
+    if start == -1 or end == -1:
+        logger.warning("Clinical reviewer returned non-JSON output: %s — fail-open (PASS)", raw[:200])
+        return True
+
+    try:
+        result = json.loads(raw[start:end + 1])
+    except Exception as parse_exc:
+        logger.warning("Clinical reviewer JSON parse error: %s — fail-open (PASS)", parse_exc)
+        return True
+
+    verdict = str(result.get("verdict", "PASS")).upper()
+    defects = result.get("defects", [])
+
+    if verdict == "REJECT":
+        logger.warning(
+            "Clinical reviewer REJECTED poll (category=%s, type=%s). Defects: %s",
+            category, poll_type, defects
+        )
+        return False
+
+    logger.info("Clinical reviewer passed poll (category=%s, verdict=%s)", category, verdict)
+    return True
 
 
 # ==============================================================================
@@ -1279,7 +1384,21 @@ class PollEngine:
                 logger.warning("Generation error in pipeline: %s", gen_err)
                 payload = None
 
-        # Шаг 5: Фолбэк при недоступности или ошибке LLM
+        # Шаг 3.5: Клинический рецензент — quality gate против галлюцинаций
+        if payload is not None and active_llm is not None:
+            try:
+                passed = await review_poll_quality(payload=payload, llm_caller=active_llm)
+            except Exception as review_err:
+                logger.warning("Reviewer raised exception: %s — fail-open", review_err)
+                passed = True
+            if not passed:
+                logger.warning(
+                    "Poll REJECTED by clinical reviewer (category=%s, topic='%s') — using fallback",
+                    triage.category, triage.topic
+                )
+                payload = None
+
+        # Шаг 5: Фолбэк при недоступности или ошибке LLM / отклонении рецензентом
         if payload is None:
             logger.info("Using reliable fallback preset for category=%s", triage.category)
             payload = get_fallback_preset(category=triage.category, poll_type=triage.format_type)
