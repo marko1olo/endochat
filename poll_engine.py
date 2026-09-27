@@ -939,12 +939,16 @@ async def triage_topic_and_format(
 async def generate_poll_content(
     triage: TriageResult,
     llm_caller: Callable,
-    timeout: float = 60.0
+    timeout: float = 60.0,
+    critique: Optional[List[str]] = None,
 ) -> Optional[PollPayload]:
     """
     Шаг 3 многошагового пайплайна:
     Генерирует строгий JSON с полями case_intro, question, options, correct_option_id,
     explanation_brief, explanation_deep на основе решения триажа.
+
+    critique — список дефектов от рецензента при повторной попытке.
+    Если передан, будет вставлен в промпт как блок коррекции перед генерацией.
     """
     type_instruction = ""
     if triage.format_type == PollType.QUIZ:
@@ -1025,6 +1029,17 @@ async def generate_poll_content(
    - ЗАПРЕЩЕНО изобретать протоколы, диагностические приёмы или показания, которых нет ни в одном признанном руководстве.
    - Перед каждым вариантом ответа задай себе вопрос: «Этот вариант — реальная тактика, которую реально применяет реальный врач данной специальности?» Если нет — замени.
 
+ОБЯЗАТЕЛЬНАЯ САМОПРОВЕРКА ПЕРЕД ОТПРАВКОЙ ОТВЕТА:
+Прежде чем выдать JSON, мысленно пройдись по чеклисту — если хотя бы один пункт нарушен, переделай вопрос:
+□ Все термины, тесты, материалы в вопросе реально применяются в дисциплине «{triage.category}»?
+□ Все упомянутые процедуры существуют в международных клинических руководствах?
+□ Все варианты ответов решают одну и ту же клиническую задачу и являются реальными альтернативами?
+□ Нет двух вариантов-близнецов (семантически идентичных)?
+□ Правильный ответ создаёт реальную дилемму (не очевидный выбор)?
+□ Вопрос не длиннее двух предложений (без case_intro)?
+□ Неправильные варианты не являются опасной тактикой, представленной как нейтральная?
+□ Вопрос — живая практическая дилемма, а не академическое заучивание?
+
 ВЫДАЙ СТРОГО JSON БЕЗ MARKDOWN РАЗМЕТКИ, БЕЗ СЛОВА ```json:
 {{
   "case_intro": "Подробный клинический случай или null...",
@@ -1040,6 +1055,18 @@ async def generate_poll_content(
   "explanation_deep": "Подробный клинический разбор и протокол лечения..."
 }}
 """
+
+    # Если это повторная попытка — prepend критику рецензента перед основным промптом
+    if critique:
+        defects_text = "\n".join(f"  - {d}" for d in critique)
+        critique_block = (
+            f"⚠️ ПРЕДЫДУЩАЯ ВЕРСИЯ ЭТОГО ОПРОСА БЫЛА ОТКЛОНЕНА КЛИНИЧЕСКИМ РЕЦЕНЗЕНТОМ.\n"
+            f"ВЫЯВЛЕННЫЕ ДЕФЕКТЫ (исправь их все до выдачи нового варианта):\n"
+            f"{defects_text}\n\n"
+            f"Сгенерируй НОВЫЙ опрос с нуля, полностью исправив все перечисленные дефекты.\n\n"
+        )
+        prompt = critique_block + prompt
+
     status_ctx = {"kind": "poll_content_gen", "thinking_level": "HIGH"}
     resp, err = await _call_llm_adapter(llm_caller, prompt, status_ctx, timeout=timeout)
     if err or not resp or not getattr(resp, "text", None):
@@ -1072,19 +1099,19 @@ async def review_poll_quality(
     payload: PollPayload,
     llm_caller: Callable,
     timeout: float = 25.0
-) -> bool:
+) -> Tuple[bool, List[str]]:
     """
-    Шаг 3.5 пайплайна — клинический контроль качества.
+    Шаг 3.5 пайплайна — клинический контроль качества (10 критериев).
 
     Выполняет независимый LLM-вызов для проверки сгенерированного опроса
     на галлюцинации, межсекционные ошибки и структурные дефекты.
 
     Returns:
-        True  — опрос прошёл проверку, можно публиковать.
-        False — обнаружены дефекты, нужен фолбэк.
+        (True, [])           — опрос прошёл, можно публиковать.
+        (False, [дефекты])   — отклонён, список дефектов для retry-промпта.
 
-    Fail-open: при LLM timeout / parse error возвращает True
-    (не блокируем публикацию из-за недоступности рецензента).
+    Fail-open: при LLM timeout / parse error возвращает (True, [])
+    (не блокируем публикацию из-за недоступности самого рецензента).
     """
     options_text = "\n".join(
         f"  [{i}] {opt}" for i, opt in enumerate(payload.options)
@@ -1099,7 +1126,7 @@ async def review_poll_quality(
     poll_type = payload.poll_type.value if payload.poll_type else "quiz"
 
     review_prompt = f"""Ты — главный врач-редактор клинического телеграм-канала для практикующих стоматологов.
-Тебе на проверку поступил автоматически сгенерированный опрос. Оцени его по 6 универсальным критериям качества.
+Тебе на проверку поступил автоматически сгенерированный опрос. Оцени его по 10 универсальным критериям.
 
 КАТЕГОРИЯ ОПРОСА: {category}
 ТИП: {poll_type}
@@ -1112,40 +1139,56 @@ async def review_poll_quality(
 КРИТЕРИИ ОТКЛОНЕНИЯ (хотя бы один нарушен = REJECT):
 
 1. ДИСЦИПЛИНАРНАЯ СОГЛАСОВАННОСТЬ
-   Каждый клинический термин, тест, материал, процедура в вопросе и вариантах ответов
-   должны РЕАЛЬНО использоваться именно в указанной дисциплине (категория: {category}).
-   Если хотя бы один элемент вопроса принадлежит другой специальности и не имеет
-   обоснованной связи с темой — это дисциплинарная галлюцинация → REJECT.
+   Каждый термин, тест, материал, процедура в вопросе и вариантах должны реально
+   использоваться именно в указанной дисциплине (категория: {category}).
+   Любой элемент из чужой специальности без обоснованной клинической связи → REJECT.
 
 2. СУЩЕСТВОВАНИЕ ПРОТОКОЛОВ И ПРОЦЕДУР
-   Каждая диагностическая или лечебная процедура, упоминаемая в вопросе или вариантах,
-   должна РЕАЛЬНО существовать в актуальных международных клинических руководствах
-   (AAE, ESE, ITI, EFP, AAOMS, SIGN, NICE, AO и т.д.) и быть применима к данной ситуации.
-   Любая выдуманная или невозможная процедура — REJECT.
+   Каждая диагностическая или лечебная процедура должна существовать в актуальных
+   международных клинических руководствах (AAE, ESE, ITI, EFP, AAOMS, SIGN, NICE, AO)
+   и быть применима к данной ситуации. Выдуманная или невозможная процедура → REJECT.
 
-3. ЛОГИЧЕСКАЯ ОДНОРОДНОСТЬ ВАРИАНТОВ ОТВЕТА
-   Все варианты должны решать одну и ту же клиническую задачу и принадлежать одному домену принятия решений.
-   Если варианты относятся к разным этапам лечения, разным специальностям или не являются
-   реальными альтернативами друг другу — REJECT.
+3. ЛОГИЧЕСКАЯ ОДНОРОДНОСТЬ ВАРИАНТОВ
+   Все варианты должны решать одну и ту же клиническую задачу и принадлежать
+   одному домену принятия решений. Варианты из разных этапов лечения, разных
+   специальностей или не являющиеся реальными альтернативами друг другу → REJECT.
 
-4. ЛАКОНИЧНОСТЬ ВОПРОСА
-   Вопрос должен быть коротким и конкретным — одно-два предложения.
-   Три и более предложения в самом вопросе (без учёта case_intro) — REJECT.
+4. ОТСУТСТВИЕ ВАРИАНТНОЙ ТАВТОЛОГИИ
+   Два и более вариантов не должны быть семантически идентичны (одно и то же,
+   перефразированное разными словами). Такой опрос не имеет смысла → REJECT.
 
-5. КЛИНИЧЕСКАЯ КОРРЕКТНОСТЬ ОТВЕТА (только для типа quiz)
-   Вариант, отмеченный как правильный, должен соответствовать действующим доказательным
-   клиническим протоколам. Если правильный ответ явно противоречит EBM или
-   является клинически опасной тактикой — REJECT.
+5. НАЛИЧИЕ РЕАЛЬНОЙ КЛИНИЧЕСКОЙ ДИЛЕММЫ (для типа quiz)
+   Правильный ответ не должен быть единственным очевидным и тривиальным вариантом,
+   который любой стажёр выберет без раздумий. Дилемма должна быть настоящей:
+   опытные врачи реально расходятся во мнениях → иначе REJECT.
 
-6. РЕЛЕВАНТНОСТЬ АУДИТОРИИ
-   Вопрос должен представлять реальную клиническую дилемму для практикующего врача-стоматолога.
-   Теоретические вопросы на заучивание (определения, составы, классификации без контекста),
-   бытовые аналогии или лайфстайл-контент в типе quiz — REJECT.
+6. СВЯЗНОСТЬ КЕЙСА И ВОПРОСА
+   Если есть case_intro, вопрос должен прямо вытекать из описанной клинической ситуации.
+   Вопрос, никак не связанный с описанным кейсом или противоречащий ему → REJECT.
+
+7. ЛАКОНИЧНОСТЬ ВОПРОСА
+   Вопрос (не case_intro) — максимум два предложения. Три и более → REJECT.
+
+8. КЛИНИЧЕСКАЯ КОРРЕКТНОСТЬ ПРАВИЛЬНОГО ОТВЕТА (только для типа quiz)
+   Вариант, отмеченный как правильный, должен соответствовать действующим
+   доказательным протоколам. Явное противоречие EBM или клинически опасная тактика → REJECT.
+
+9. БЕЗОПАСНОСТЬ ДИСТРАКТОРОВ
+   Неправильные варианты не должны представлять реально опасную или недопустимую
+   тактику как нейтральную клиническую альтернативу без какого-либо маркера.
+   «Ничего не делать» при острой патологии или грубо ятрогенная тактика как
+   нормальный вариант выбора → REJECT.
+
+10. РЕЛЕВАНТНОСТЬ АУДИТОРИИ
+    Вопрос должен быть практической дилеммой у кресла для оперирующего врача-стоматолога.
+    Академическое заучивание (определения, составы, классификации без кейса),
+    бытовые аналогии, лайфстайл-вопросы в типе quiz → REJECT.
 
 ЕСЛИ ДЕФЕКТОВ НЕТ — верни PASS. Не придирайся к стилю, опечаткам, выбору FDI-номера зуба.
+Если REJECT — опиши дефекты кратко и конкретно, чтобы автор мог исправить каждый.
 
 Ответь СТРОГО JSON (без markdown, без пояснений):
-{{"verdict": "PASS" или "REJECT", "defects": ["краткое описание нарушенного критерия"] или []}}
+{{"verdict": "PASS" или "REJECT", "defects": ["дефект: конкретное описание"] или []}}
 """
 
     status_ctx = {"kind": "poll_clinical_review"}
@@ -1153,37 +1196,37 @@ async def review_poll_quality(
         resp, err = await _call_llm_adapter(llm_caller, review_prompt, status_ctx, timeout=timeout)
     except Exception as exc:
         logger.warning("Clinical reviewer call raised exception: %s — fail-open (PASS)", exc)
-        return True
+        return True, []
 
     if err or not resp or not getattr(resp, "text", None):
         logger.warning("Clinical reviewer LLM unavailable (err=%s) — fail-open (PASS)", err)
-        return True
+        return True, []
 
     raw = resp.text.strip()
     start = raw.find("{")
     end = raw.rfind("}")
     if start == -1 or end == -1:
         logger.warning("Clinical reviewer returned non-JSON output: %s — fail-open (PASS)", raw[:200])
-        return True
+        return True, []
 
     try:
         result = json.loads(raw[start:end + 1])
     except Exception as parse_exc:
         logger.warning("Clinical reviewer JSON parse error: %s — fail-open (PASS)", parse_exc)
-        return True
+        return True, []
 
     verdict = str(result.get("verdict", "PASS")).upper()
-    defects = result.get("defects", [])
+    defects: List[str] = result.get("defects", [])
 
     if verdict == "REJECT":
         logger.warning(
             "Clinical reviewer REJECTED poll (category=%s, type=%s). Defects: %s",
             category, poll_type, defects
         )
-        return False
+        return False, defects
 
     logger.info("Clinical reviewer passed poll (category=%s, verdict=%s)", category, verdict)
-    return True
+    return True, []
 
 
 # ==============================================================================
@@ -1399,27 +1442,54 @@ class PollEngine:
 
         payload: Optional[PollPayload] = None
 
-        # Шаг 3 и 4: Генерация через LLM и санитизация
-        if active_llm is not None:
-            try:
-                payload = await generate_poll_content(triage=triage, llm_caller=active_llm)
-            except Exception as gen_err:
-                logger.warning("Generation error in pipeline: %s", gen_err)
-                payload = None
+        # Шаг 3–3.5: Генерация + клинический рецензент, до 3 попыток (оригинал + 2 retry)
+        MAX_GENERATION_ATTEMPTS = 3
+        last_critique: Optional[List[str]] = None
 
-        # Шаг 3.5: Клинический рецензент — quality gate против галлюцинаций
-        if payload is not None and active_llm is not None:
-            try:
-                passed = await review_poll_quality(payload=payload, llm_caller=active_llm)
-            except Exception as review_err:
-                logger.warning("Reviewer raised exception: %s — fail-open", review_err)
-                passed = True
-            if not passed:
+        if active_llm is not None:
+            for attempt in range(1, MAX_GENERATION_ATTEMPTS + 1):
+                try:
+                    candidate = await generate_poll_content(
+                        triage=triage,
+                        llm_caller=active_llm,
+                        critique=last_critique,
+                    )
+                except Exception as gen_err:
+                    logger.warning("Generation error (attempt %d): %s", attempt, gen_err)
+                    candidate = None
+
+                if candidate is None:
+                    logger.warning("Generation returned None on attempt %d — stopping retry", attempt)
+                    break
+
+                # Клинический рецензент
+                try:
+                    passed, defects = await review_poll_quality(
+                        payload=candidate, llm_caller=active_llm
+                    )
+                except Exception as review_err:
+                    logger.warning("Reviewer raised exception (attempt %d): %s — fail-open", attempt, review_err)
+                    passed, defects = True, []
+
+                if passed:
+                    logger.info(
+                        "Poll passed clinical review on attempt %d (category=%s, topic='%s')",
+                        attempt, triage.category, triage.topic
+                    )
+                    payload = candidate
+                    break
+
                 logger.warning(
-                    "Poll REJECTED by clinical reviewer (category=%s, topic='%s') — using fallback",
-                    triage.category, triage.topic
+                    "Poll REJECTED on attempt %d/%d (category=%s). Defects: %s",
+                    attempt, MAX_GENERATION_ATTEMPTS, triage.category, defects
                 )
-                payload = None
+                last_critique = defects or ["Содержит клинические ошибки или галлюцинации — сгенерируй заново с нуля"]
+
+                if attempt == MAX_GENERATION_ATTEMPTS:
+                    logger.error(
+                        "All %d generation attempts rejected — falling back to preset (category=%s)",
+                        MAX_GENERATION_ATTEMPTS, triage.category
+                    )
 
         # Шаг 5: Фолбэк при недоступности или ошибке LLM / отклонении рецензентом
         if payload is None:
