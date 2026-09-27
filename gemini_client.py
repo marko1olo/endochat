@@ -548,6 +548,7 @@ TRIAGE_KINDS = frozenset({
     "llama_triage", "bot_mention_triage", "response_validator", "referee_analyser",
     "group_ping_hot_check", "protocol_extraction",
     "react_standalone_triage", "react_triage",  # реакции — дешёвый lite-каскад
+    "poll_triage",
 })
 # Живой диалог: ответ ждёт врач в чате, поэтому впереди lite-модели.
 CHAT_KINDS = frozenset({
@@ -655,8 +656,8 @@ def generate_text(prompt, status_context=None, timeout=None):
     # разбор — у расчёта бюджета после сборки каскада.
     req_timeout = 35.0
 
-    # ROUTING BY TASKS: списки видов — TRIAGE_KINDS / CHAT_KINDS выше.
     is_chatbot = kind in CHAT_KINDS
+    is_clinical_review = (kind == "poll_clinical_review")
 
     if is_triage:
         models_cascade = [
@@ -667,6 +668,15 @@ def generate_text(prompt, status_context=None, timeout=None):
             ("gemini-3.8-flash", "gemini"),
             ("gemini-3.7-flash", "gemini"),
             ("gemini-3.6-flash", "gemini"),
+        ]
+    elif is_clinical_review:
+        # Независимый кросс-модельный рецензент: опрос от Gemini проверяет Qwen/Groq!
+        models_cascade = [
+            ("qwen/qwen3.8-27b", "groq"),
+            ("openai/gpt-oss-120b", "groq"),
+            ("gemini-3.8-flash", "gemini"),
+            ("gemini-3.7-flash", "gemini"),
+            ("gemini-3.5-flash-lite", "gemini"),
         ]
     elif is_chatbot and (thinking_level == "MEDIUM" or (kind in ("pm_chat", "pm_ping") and thinking_level != "HIGH")):
         models_cascade = [
@@ -847,10 +857,18 @@ def generate_text(prompt, status_context=None, timeout=None):
                     messages_payload = [{"role": "user", "content": prompt}]
 
                 # Using OpenAI SDK for BOTH Groq and Gemini now
+                ctx_temp = status_context.get("temperature") if isinstance(status_context, dict) else None
+                if ctx_temp is not None:
+                    eff_temp = float(ctx_temp)
+                elif is_triage or is_clinical_review:
+                    eff_temp = 0.2
+                else:
+                    eff_temp = 0.95
+
                 create_kwargs = {
                     "model": model_name,
                     "messages": messages_payload,
-                    "temperature": 0.95,
+                    "temperature": eff_temp,
                 }
                 ctx_max_tokens = status_context.get("max_tokens") if isinstance(status_context, dict) else None
                 if ctx_max_tokens:

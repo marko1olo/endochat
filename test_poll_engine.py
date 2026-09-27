@@ -440,6 +440,8 @@ async def test_end_to_end_pipeline() -> None:
     }
 
     async def mock_llm_pipeline(prompt, status_ctx=None, timeout=None):
+        if status_ctx and status_ctx.get("kind") == "poll_clinical_review":
+            return FakeLLMResponse('{"verdict": "PASS", "defects": []}'), None
         return FakeLLMResponse(json.dumps(llm_payload, ensure_ascii=False)), None
 
     engine = PollEngine(default_llm_caller=mock_llm_pipeline)
