@@ -876,18 +876,59 @@ async def scheduler_task(bot_client):
                         import poll_engine
                         # Кэширование сгенерированного опроса на день (один опрос на все чаты-цели)
                         if daily_poll_cached_payload is None:
-                            logger.info("🎲 Формирование ежедневного клинического опроса...")
-                            recent_rows = await database.get_last_n_messages(limit=25)
-                            chat_context = []
-                            if recent_rows:
-                                chat_context = [f"{r[1]}: {r[3]}" for r in recent_rows if r[3]]
+                            today_tpl = await poll_storage.get_today_poll_template()
+                            if today_tpl:
+                                logger.info(
+                                    "📋 Использование уже созданного сегодняшнего опроса #%s (%s)",
+                                    today_tpl.get('id'), today_tpl.get('topic')
+                                )
+                                case_intro = today_tpl.get('case_intro')
+                                if not case_intro:
+                                    for preset in poll_engine.POLL_FALLBACK_PRESETS:
+                                        if preset.get('question') == today_tpl.get('question') or preset.get('topic') == today_tpl.get('topic'):
+                                            case_intro = preset.get('case_intro')
+                                            break
+                                if not case_intro and today_tpl.get('case_msg_id') and today_tpl.get('chat_id'):
+                                    try:
+                                        orig_msg = await bot_client.get_messages(today_tpl['chat_id'], ids=today_tpl['case_msg_id'])
+                                        if orig_msg and orig_msg.text:
+                                            case_intro = orig_msg.text
+                                    except Exception as fetch_err:
+                                        logger.warning("Не удалось получить case_msg из Telegram: %s", fetch_err)
 
-                            payload, media = await poll_engine.generate_poll(
-                                chat_context=chat_context,
-                                force_type=None,
-                                is_anonymous=True  # MTProto Anonymous Dilemma: анонимный опрос в группе
-                            )
-                            daily_poll_cached_payload = (payload, media)
+                                payload = poll_engine.PollPayload(
+                                    question=today_tpl['question'],
+                                    options=today_tpl['options'],
+                                    poll_type=poll_engine.PollType(today_tpl['poll_type']),
+                                    correct_option_id=today_tpl.get('correct_option_id'),
+                                    explanation_brief=today_tpl.get('explanation_brief') or "",
+                                    explanation_deep=today_tpl.get('explanation_deep') or "",
+                                    case_intro=case_intro,
+                                    topic=today_tpl.get('topic') or "",
+                                    category=today_tpl.get('topic') or ""
+                                )
+                                media = poll_engine.build_poll_media(
+                                    question=payload.question,
+                                    options=payload.options,
+                                    poll_type=payload.poll_type.value,
+                                    correct_idx=payload.correct_option_id if payload.correct_option_id is not None else 0,
+                                    explanation=payload.explanation_brief,
+                                    is_anonymous=True
+                                )
+                                daily_poll_cached_payload = (payload, media)
+                            else:
+                                logger.info("🎲 Формирование ежедневного клинического опроса...")
+                                recent_rows = await database.get_last_n_messages(limit=25)
+                                chat_context = []
+                                if recent_rows:
+                                    chat_context = [f"{r[1]}: {r[3]}" for r in recent_rows if r[3]]
+
+                                payload, media = await poll_engine.generate_poll(
+                                    chat_context=chat_context,
+                                    force_type=None,
+                                    is_anonymous=True  # MTProto Anonymous Dilemma: анонимный опрос в группе
+                                )
+                                daily_poll_cached_payload = (payload, media)
                         else:
                             payload, _ = daily_poll_cached_payload
                             media = poll_engine.build_poll_media(
@@ -938,7 +979,8 @@ async def scheduler_task(bot_client):
                                 options_json=json.dumps(payload.options, ensure_ascii=False),
                                 correct_option_id=payload.correct_option_id,
                                 explanation_brief=payload.explanation_brief,
-                                explanation_deep=payload.explanation_deep
+                                explanation_deep=payload.explanation_deep,
+                                case_intro=payload.case_intro
                             )
                             logger.info("✅ Ежедневный клинический опрос #%s успешно отправлен в %s", poll_id, tgt_chat)
 

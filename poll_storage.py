@@ -96,12 +96,18 @@ async def init_poll_tables(db_path: Optional[str] = None) -> None:
                 correct_option_id INTEGER,
                 explanation_brief TEXT,
                 explanation_deep TEXT,
+                case_intro TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 closed_at TIMESTAMP,
                 is_closed BOOLEAN DEFAULT 0
             )
             """
         )
+
+        try:
+            await db.execute("ALTER TABLE daily_polls ADD COLUMN case_intro TEXT")
+        except Exception:
+            pass
 
         await db.execute(
             """
@@ -152,6 +158,7 @@ async def save_poll(
     correct_option_id: Optional[int] = None,
     explanation_brief: Optional[str] = None,
     explanation_deep: Optional[str] = None,
+    case_intro: Optional[str] = None,
     is_closed: Optional[bool] = None,
     closed_at: Optional[str] = None,
     created_at: Optional[str] = None,
@@ -181,6 +188,7 @@ async def save_poll(
         correct_option_id = data.get("correct_option_id", correct_option_id)
         explanation_brief = data.get("explanation_brief", explanation_brief)
         explanation_deep = data.get("explanation_deep", explanation_deep)
+        case_intro = data.get("case_intro", case_intro)
         is_closed = data.get("is_closed", is_closed)
         closed_at = data.get("closed_at", closed_at)
         created_at = data.get("created_at", created_at)
@@ -189,6 +197,8 @@ async def save_poll(
 
     if poll_id is None and "id" in kwargs:
         poll_id = kwargs["id"]
+    if case_intro is None and "case_intro" in kwargs:
+        case_intro = kwargs["case_intro"]
 
     if poll_id is None:
         raise ValueError("Обязательный идентификатор poll_id не указан")
@@ -252,6 +262,9 @@ async def save_poll(
             if explanation_deep is not None:
                 update_fields.append("explanation_deep = ?")
                 params.append(explanation_deep)
+            if case_intro is not None:
+                update_fields.append("case_intro = ?")
+                params.append(case_intro)
             if is_closed is not None:
                 update_fields.append("is_closed = ?")
                 params.append(1 if is_closed else 0)
@@ -275,8 +288,8 @@ async def save_poll(
                 INSERT INTO daily_polls (
                     id, chat_id, case_msg_id, poll_msg_id, resolution_msg_id,
                     poll_type, topic, question, options_json, correct_option_id,
-                    explanation_brief, explanation_deep, is_closed, closed_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    explanation_brief, explanation_deep, case_intro, is_closed, closed_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """
             insert_params = (
                 target_poll_id,
@@ -291,6 +304,7 @@ async def save_poll(
                 correct_option_id,
                 explanation_brief,
                 explanation_deep,
+                case_intro,
                 closed_val,
                 closed_at,
             )
@@ -680,3 +694,22 @@ async def get_poll_votes(poll_id: int, db_path: Optional[str] = None) -> List[Di
         ) as cursor:
             rows = await cursor.fetchall()
             return [dict(r) for r in rows]
+
+
+async def get_today_poll_template(db_path: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """
+    Возвращает данные сегодняшнего созданного опроса (из любого чата/топика),
+    чтобы синхронизировать одинаковый опрос между тест-каналом и прод-чатом.
+    """
+    async with get_db_connection(db_path) as db:
+        async with db.execute(
+            """
+            SELECT * FROM daily_polls
+            WHERE date(created_at, '+3 hours') = date('now', '+3 hours')
+            ORDER BY created_at DESC
+            LIMIT 1
+            """
+        ) as cursor:
+            row = await cursor.fetchone()
+            return _format_poll_dict(row) if row else None
+

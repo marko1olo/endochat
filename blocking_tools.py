@@ -754,6 +754,8 @@ EXHAUSTION_RETRY_KINDS = frozenset({
     "dialogue_fallback",
     "media_fallback",
     "transcription_corrector",
+    "poll_content_gen",
+    "poll_clinical_review",
 })
 
 # Паузы между 3 шансами при вылете всех ключей/моделей

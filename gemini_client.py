@@ -567,8 +567,17 @@ CHAT_KINDS = frozenset({
     "dialogue_fallback",
     "media_fallback",
 })
+# Генерация контента опроса — только Gemini, без Qwen/GPT.
+# Qwen 3.8-27B при русских промптах выдаёт chinese thinking leaks:
+# иероглифы в тексте ("宽ом апексе"), смешанные слова ("gutтаперчи").
+# Опрос не real-time (расписание 13:30 МСК) — задержки ретраев допустимы.
+# При вылете всех ключей Gemini: EXHAUSTION_RETRY_KINDS даёт 3 шанса с паузой 30/60/90s.
+POLL_GEN_KINDS = frozenset({
+    "poll_content_gen",
+})
 # Всё остальное — daily, weekly, group_summary и любой незнакомый вид — идёт в
 # тяжёлый каскад: там качество важнее задержки, и бюджет там 2100 с.
+
 
 # Ниже этого одна попытка бессмысленна: запрос рвётся на генерации. Значение
 # унаследовано от прежнего max(7.0, ...) — нижнюю границу автор уже выбрал.
@@ -658,6 +667,7 @@ def generate_text(prompt, status_context=None, timeout=None):
 
     is_chatbot = kind in CHAT_KINDS
     is_clinical_review = (kind == "poll_clinical_review")
+    is_poll_gen = kind in POLL_GEN_KINDS
 
     if is_triage:
         models_cascade = [
@@ -677,6 +687,16 @@ def generate_text(prompt, status_context=None, timeout=None):
             ("gemini-3.8-flash", "gemini"),
             ("gemini-3.7-flash", "gemini"),
             ("gemini-3.5-flash-lite", "gemini"),
+        ]
+    elif is_poll_gen:
+        # Только Gemini: Qwen выдаёт chinese thinking leaks в русском тексте.
+        # Опрос не real-time — при вылете ключей ждём EXHAUSTION_RETRY_KINDS backoff.
+        models_cascade = [
+            ("gemini-3.8-flash", "gemini"),
+            ("gemini-3.7-flash", "gemini"),
+            ("gemini-3.6-flash", "gemini"),
+            ("gemini-3.5-flash-lite", "gemini"),
+            ("gemini-3.1-flash-lite", "gemini"),
         ]
     elif is_chatbot and (thinking_level == "MEDIUM" or (kind in ("pm_chat", "pm_ping") and thinking_level != "HIGH")):
         models_cascade = [
@@ -709,6 +729,7 @@ def generate_text(prompt, status_context=None, timeout=None):
             ("qwen/qwen3.8-27b", "groq"),
             ("openai/gpt-oss-120b", "groq"),
         ]
+
 
     # Отсев забаненных за 503/504 — через общий учёт (active_models), а не своей
     # копией цикла: вторая копия проверки бана уже начинала расходиться с первой.
