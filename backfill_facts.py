@@ -107,6 +107,8 @@ def extract_clinical_facts(
         f = re.sub(r'\s+', ' ', f)
         norm = f.lower()
         if f and norm not in seen and len(f) >= 8:
+            if "специализация:" in norm and any("специализация:" in s for s in seen):
+                return
             seen.add(norm)
             facts.append(f)
 

@@ -619,6 +619,55 @@ class TestPollStorage(unittest.IsolatedAsyncioTestCase):
         assert p_today_after is not None
         self.assertTrue(p_today_after["is_closed"])
 
+    async def test_case_intro_and_today_template(self) -> None:
+        """Проверка сохранения case_intro и выборки шаблона сегодняшнего опроса через get_today_poll_template."""
+        chat_id = -100998877
+        poll_id = 9001
+        intro_text = "Пациент 42 года. Жалобы на боли при накусывании в области зуба 4.6."
+
+        # 1. Сохраняем новый опрос с case_intro
+        await poll_storage.save_poll(
+            poll_id=poll_id,
+            chat_id=chat_id,
+            poll_type="quiz",
+            topic="endo",
+            question="Какой протокол ирригации предпочтителен?",
+            options=["NaOCl 3% + EDTA 17%", "Хлоргексидин 2%", "Дистиллированная вода"],
+            correct_option_id=0,
+            explanation_brief="NaOCl и EDTA взаимно дополняют действие.",
+            explanation_deep="NaOCl растворяет органику, EDTA удаляет смазанный слой.",
+            case_intro=intro_text,
+            db_path=self.db_path,
+        )
+
+        # 2. Проверяем get_poll
+        poll = await poll_storage.get_poll(poll_id, db_path=self.db_path)
+        self.assertIsNotNone(poll)
+        assert poll is not None
+        self.assertEqual(poll["case_intro"], intro_text)
+        self.assertEqual(len(poll["options"]), 3)
+
+        # 3. Проверяем get_today_poll_template
+        template = await poll_storage.get_today_poll_template(db_path=self.db_path)
+        self.assertIsNotNone(template)
+        assert template is not None
+        self.assertEqual(template["id"], poll_id)
+        self.assertEqual(template["case_intro"], intro_text)
+        self.assertEqual(template["question"], "Какой протокол ирригации предпочтителен?")
+        self.assertEqual(template["options"], ["NaOCl 3% + EDTA 17%", "Хлоргексидин 2%", "Дистиллированная вода"])
+
+        # 4. Обновляем case_intro и проверяем сохранение
+        updated_intro = "Обновленная клиническая виньетка: зуб 4.6, перкуссия резко болезненна."
+        await poll_storage.save_poll(
+            poll_id=poll_id,
+            chat_id=chat_id,
+            case_intro=updated_intro,
+            db_path=self.db_path,
+        )
+        poll_up = await poll_storage.get_poll(poll_id, db_path=self.db_path)
+        assert poll_up is not None
+        self.assertEqual(poll_up["case_intro"], updated_intro)
+
 
 def run_tests() -> int:
     """Запуск набора тестов с человекочитаемым форматированием."""

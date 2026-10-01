@@ -896,10 +896,16 @@ async def scheduler_task(bot_client):
                                     except Exception as fetch_err:
                                         logger.warning("Не удалось получить case_msg из Telegram: %s", fetch_err)
 
+                                raw_p_type = today_tpl.get('poll_type') or "quiz"
+                                try:
+                                    resolved_p_type = poll_engine.PollType(raw_p_type)
+                                except Exception:
+                                    resolved_p_type = poll_engine.PollType.QUIZ
+
                                 payload = poll_engine.PollPayload(
                                     question=today_tpl['question'],
                                     options=today_tpl['options'],
-                                    poll_type=poll_engine.PollType(today_tpl['poll_type']),
+                                    poll_type=resolved_p_type,
                                     correct_option_id=today_tpl.get('correct_option_id'),
                                     explanation_brief=today_tpl.get('explanation_brief') or "",
                                     explanation_deep=today_tpl.get('explanation_deep') or "",

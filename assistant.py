@@ -10665,7 +10665,8 @@ async def handle_native_group_poll(bot_client, event, force_type=None):
                 options_json=json.dumps(payload.options, ensure_ascii=False),
                 correct_option_id=payload.correct_option_id,
                 explanation_brief=payload.explanation_brief,
-                explanation_deep=payload.explanation_deep
+                explanation_deep=payload.explanation_deep,
+                case_intro=payload.case_intro
             )
 
 
