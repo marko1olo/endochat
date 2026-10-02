@@ -325,6 +325,27 @@ def provider_pool(provider):
     return []
 
 
+GCP_PROJECT_COOLDOWN_SECONDS = 60
+
+
+def is_gcp_project_quota_error(error_text: str) -> bool:
+    """Определяет, относится ли ошибка 429 к квоте всего проекта GCP (все 10 ключей одного проекта)."""
+    err_lower = str(error_text or "").lower()
+    return (
+        "project_number:" in err_lower
+        or "generatecontentrequestsperminuteperprojectperregion" in err_lower
+        or "886969145965" in err_lower
+        or ("resource_exhausted" in err_lower and ("project" in err_lower or "perproject" in err_lower))
+    )
+
+
+def set_provider_pool_cooldown(provider: str, seconds: int = GCP_PROJECT_COOLDOWN_SECONDS) -> None:
+    """Устанавливает кулдаун на весь пул ключей провайдера (при исчерпании проектной квоты GCP)."""
+    pool = provider_pool(provider)
+    for k in pool:
+        set_key_cooldown(provider, k, seconds=seconds)
+
+
 def get_provider_client(provider, api_key, timeout=30.0):
     """Клиент к провайдеру по его имени. Единственная точка создания клиента."""
     base_url = PROVIDER_BASE_URLS.get(provider)
@@ -454,7 +475,15 @@ def note_key_failure(provider, api_key, error_text, model_name=None):
     """
     err_msg = str(error_text or "").lower()
     if _RATE_LIMIT_RE.search(err_msg):
-        set_key_cooldown(provider, api_key)
+        if provider == "gemini" and is_gcp_project_quota_error(err_msg):
+            set_provider_pool_cooldown("gemini", seconds=GCP_PROJECT_COOLDOWN_SECONDS)
+            logger.warning(
+                "Gemini GCP Project quota exhausted (%s). "
+                "Placed all %d Google keys on %ds cooldown to prevent burning keys.",
+                err_msg[:120], len(provider_pool("gemini")), GCP_PROJECT_COOLDOWN_SECONDS,
+            )
+        else:
+            set_key_cooldown(provider, api_key)
         # В журнале называем ПОСЛЕДСТВИЕ, а не только механику: строка
         # «placing key on 300s cooldown» не отвечала на единственный вопрос,
         # который стоит задавать по такой записи, — осталось ли чем отвечать
@@ -647,6 +676,87 @@ def _record_failure(reason, detail="", api_key=None):
     LAST_FAILURE = {"reason": reason, "detail": text, "ts": time.time()}
 
 
+def cascade_for_context(status_context=None):
+    """
+    Формирует каскад (model_name, provider) в зависимости от контекста задачи.
+    Для CHAT_KINDS: gemini-3.5-flash-lite в начале для быстрых ответов (при LOW/MEDIUM),
+    но gemini-3.8-flash доступен для глубоких рассуждений (при HIGH).
+    Для daemon_memory и простых задач с LOW не проваливается во флагманский gemini-3.8-flash.
+    """
+    kind = status_context.get("kind") if status_context else None
+    is_triage = kind in TRIAGE_KINDS
+    summary_kinds = getattr(runtime_guard, "SUMMARY_KINDS", frozenset({"daily", "weekly", "group_summary"}))
+    if kind in summary_kinds and (not status_context or "thinking_level" not in status_context):
+        thinking_level = "HIGH"
+    else:
+        thinking_level = status_context.get("thinking_level", "MEDIUM") if status_context else "MEDIUM"
+
+    is_chatbot = kind in CHAT_KINDS
+    is_clinical_review = (kind == "poll_clinical_review")
+    is_poll_gen = kind in POLL_GEN_KINDS
+
+    if is_triage:
+        return [
+            ("gemini-3.5-flash-lite", "gemini"),
+            ("qwen/qwen3.8-27b", "groq"),
+            ("gemini-3.1-flash-lite", "gemini"),
+            ("openai/gpt-oss-120b", "groq"),
+            ("gemini-3.8-flash", "gemini"),
+            ("gemini-3.7-flash", "gemini"),
+            ("gemini-3.6-flash", "gemini"),
+        ]
+    elif is_clinical_review:
+        # Независимый кросс-модельный рецензент: опрос от Gemini проверяет Qwen/Groq!
+        return [
+            ("qwen/qwen3.8-27b", "groq"),
+            ("openai/gpt-oss-120b", "groq"),
+            ("gemini-3.8-flash", "gemini"),
+            ("gemini-3.7-flash", "gemini"),
+            ("gemini-3.5-flash-lite", "gemini"),
+        ]
+    elif is_poll_gen:
+        # Только Gemini: Qwen выдаёт chinese thinking leaks в русском тексте.
+        # Опрос не real-time — при вылете ключей ждём EXHAUSTION_RETRY_KINDS backoff.
+        return [
+            ("gemini-3.8-flash", "gemini"),
+            ("gemini-3.7-flash", "gemini"),
+            ("gemini-3.6-flash", "gemini"),
+            ("gemini-3.5-flash-lite", "gemini"),
+            ("gemini-3.1-flash-lite", "gemini"),
+        ]
+    elif is_chatbot and (thinking_level in ("LOW", "MEDIUM") or (kind in ("pm_chat", "pm_ping") and thinking_level != "HIGH")):
+        return [
+            ("gemini-3.5-flash-lite", "gemini"),
+            ("gemini-3.8-flash", "gemini"),
+            ("gemini-3.7-flash", "gemini"),
+            ("gemini-3.6-flash", "gemini"),
+            ("qwen/qwen3.8-27b", "groq"),
+            ("gemini-3.1-flash-lite", "gemini"),
+            ("openai/gpt-oss-120b", "groq"),
+        ]
+    elif is_chatbot:
+        return [
+            ("gemini-3.8-flash", "gemini"),
+            ("gemini-3.7-flash", "gemini"),
+            ("gemini-3.6-flash", "gemini"),
+            ("gemini-3.5-flash-lite", "gemini"),
+            ("qwen/qwen3.8-27b", "groq"),
+            ("gemini-3.1-flash-lite", "gemini"),
+            ("openai/gpt-oss-120b", "groq"),
+        ]
+    else:
+        # Complex tasks (Summaries, analytics, etc)
+        return [
+            (config.GEMINI_MODEL, "gemini"), # gemini-3.8-flash
+            ("gemini-3.7-flash", "gemini"),
+            ("gemini-3.6-flash", "gemini"),
+            ("gemini-3.5-flash-lite", "gemini"),
+            ("gemini-3.1-flash-lite", "gemini"),
+            ("qwen/qwen3.8-27b", "groq"),
+            ("openai/gpt-oss-120b", "groq"),
+        ]
+
+
 def generate_text(prompt, status_context=None, timeout=None):
     """Generate summary text through Gemini with Groq fallback."""
     _reset_failure()
@@ -658,7 +768,14 @@ def generate_text(prompt, status_context=None, timeout=None):
     # test_fix_cascade.py:264. Живой флаг, вычисляемый из мёртвого условия, читается
     # как «здесь есть ветка для личных сообщений», которой нет.
     is_triage = kind in TRIAGE_KINDS
-    thinking_level = status_context.get("thinking_level", "MEDIUM") if status_context else "MEDIUM"
+    is_chatbot = kind in CHAT_KINDS
+    is_clinical_review = (kind == "poll_clinical_review")
+    is_poll_gen = kind in POLL_GEN_KINDS
+    summary_kinds = getattr(runtime_guard, "SUMMARY_KINDS", frozenset({"daily", "weekly", "group_summary"}))
+    if kind in summary_kinds and (not status_context or "thinking_level" not in status_context):
+        thinking_level = "HIGH"
+    else:
+        thinking_level = status_context.get("thinking_level", "MEDIUM") if status_context else "MEDIUM"
 
     groq_fallback = "openai/gpt-oss-120b" if thinking_level == "HIGH" else config.GROQ_MODEL
 
@@ -668,70 +785,7 @@ def generate_text(prompt, status_context=None, timeout=None):
     # разбор — у расчёта бюджета после сборки каскада.
     req_timeout = 35.0
 
-    is_chatbot = kind in CHAT_KINDS
-    is_clinical_review = (kind == "poll_clinical_review")
-    is_poll_gen = kind in POLL_GEN_KINDS
-
-    if is_triage:
-        models_cascade = [
-            ("gemini-3.5-flash-lite", "gemini"),
-            ("qwen/qwen3.8-27b", "groq"),
-            ("gemini-3.1-flash-lite", "gemini"),
-            ("openai/gpt-oss-120b", "groq"),
-            ("gemini-3.8-flash", "gemini"),
-            ("gemini-3.7-flash", "gemini"),
-            ("gemini-3.6-flash", "gemini"),
-        ]
-    elif is_clinical_review:
-        # Независимый кросс-модельный рецензент: опрос от Gemini проверяет Qwen/Groq!
-        models_cascade = [
-            ("qwen/qwen3.8-27b", "groq"),
-            ("openai/gpt-oss-120b", "groq"),
-            ("gemini-3.8-flash", "gemini"),
-            ("gemini-3.7-flash", "gemini"),
-            ("gemini-3.5-flash-lite", "gemini"),
-        ]
-    elif is_poll_gen:
-        # Только Gemini: Qwen выдаёт chinese thinking leaks в русском тексте.
-        # Опрос не real-time — при вылете ключей ждём EXHAUSTION_RETRY_KINDS backoff.
-        models_cascade = [
-            ("gemini-3.8-flash", "gemini"),
-            ("gemini-3.7-flash", "gemini"),
-            ("gemini-3.6-flash", "gemini"),
-            ("gemini-3.5-flash-lite", "gemini"),
-            ("gemini-3.1-flash-lite", "gemini"),
-        ]
-    elif is_chatbot and (thinking_level == "MEDIUM" or (kind in ("pm_chat", "pm_ping") and thinking_level != "HIGH")):
-        models_cascade = [
-            ("gemini-3.5-flash-lite", "gemini"),
-            ("gemini-3.8-flash", "gemini"),
-            ("gemini-3.7-flash", "gemini"),
-            ("gemini-3.6-flash", "gemini"),
-            ("qwen/qwen3.8-27b", "groq"),
-            ("gemini-3.1-flash-lite", "gemini"),
-            ("openai/gpt-oss-120b", "groq"),
-        ]
-    elif is_chatbot:
-        models_cascade = [
-            ("gemini-3.8-flash", "gemini"),
-            ("gemini-3.7-flash", "gemini"),
-            ("gemini-3.6-flash", "gemini"),
-            ("gemini-3.5-flash-lite", "gemini"),
-            ("qwen/qwen3.8-27b", "groq"),
-            ("gemini-3.1-flash-lite", "gemini"),
-            ("openai/gpt-oss-120b", "groq"),
-        ]
-    else:
-        # Complex tasks (Summaries, analytics, etc)
-        models_cascade = [
-            (config.GEMINI_MODEL, "gemini"), # gemini-3.8-flash
-            ("gemini-3.7-flash", "gemini"),
-            ("gemini-3.6-flash", "gemini"),
-            ("gemini-3.5-flash-lite", "gemini"),
-            ("gemini-3.1-flash-lite", "gemini"),
-            ("qwen/qwen3.8-27b", "groq"),
-            ("openai/gpt-oss-120b", "groq"),
-        ]
+    models_cascade = cascade_for_context(status_context)
 
 
     # Отсев забаненных за 503/504 — через общий учёт (active_models), а не своей
@@ -905,19 +959,25 @@ def generate_text(prompt, status_context=None, timeout=None):
                     create_kwargs["max_tokens"] = min(create_kwargs["max_tokens"], 800)
 
                 # Нативный параметр размышлений для моделей:
-                # Передаем ТОЛЬКО Gemini, так как Groq API не поддерживает reasoning_effort
+                # Передаем ТОЛЬКО Gemini, так как Groq API не поддерживает reasoning_effort.
+                # Google OpenAI endpoint поддерживает только 'low', 'medium', 'high'.
+                # Значение 'none' вызывает 400 INVALID_ARGUMENT, поэтому для none/triage опускаем параметр.
                 if provider == "gemini":
-                    if is_triage or thinking_level == "LOW":
+                    if is_triage or thinking_level in ("NONE", "none"):
+                        pass
+                    elif thinking_level == "LOW":
                         create_kwargs["reasoning_effort"] = "low"
-                    else:
+                    elif thinking_level == "HIGH":
                         create_kwargs["reasoning_effort"] = "high"
+                    else:  # MEDIUM
+                        create_kwargs["reasoning_effort"] = "medium"
 
                 try:
                     response = client.chat.completions.create(**create_kwargs)
                 except (TypeError, Exception) as err:
                     err_str = str(err).lower()
                     retry_needed = False
-                    if "reasoning_effort" in err_str and "reasoning_effort" in create_kwargs:
+                    if ("reasoning_effort" in err_str or "invalid argument" in err_str) and "reasoning_effort" in create_kwargs:
                         create_kwargs.pop("reasoning_effort", None)
                         retry_needed = True
                     if any(kw in err_str for kw in ("image_url", "image input", "not support image", "unsupported content")):
@@ -958,6 +1018,28 @@ def generate_text(prompt, status_context=None, timeout=None):
             except Exception as exc:
                 err_msg = str(exc).lower()
                 logger.warning(f"{provider.capitalize()} failed attempt={attempt + 1}/{max_attempts} key={key_id}: {exc}")
+
+                is_status_400 = (
+                    getattr(exc, "status_code", None) == 400
+                    or "400" in err_msg
+                    or "bad request" in err_msg
+                )
+                is_fatal_400 = is_status_400 and (
+                    "invalid_argument" in err_msg
+                    or "context_length_exceeded" in err_msg
+                    or "token count exceeds" in err_msg
+                    or "maximum context length" in err_msg
+                    or "context_window_exceeded" in err_msg
+                )
+                if is_fatal_400:
+                    logger.warning(
+                        f"{provider.capitalize()} fatal deterministic 400 Bad Request ({err_msg[:120]}). "
+                        "Aborting cascade immediately with fatal_invalid_request."
+                    )
+                    _record_failure("fatal_invalid_request", str(exc), api_key)
+                    out_of_budget = True
+                    break
+
                 if _is_retryable_gemini_error(err_msg):
                     sleep_time = _retry_sleep_seconds(attempt)
                 else:
@@ -978,7 +1060,20 @@ def generate_text(prompt, status_context=None, timeout=None):
                     provider, api_key, str(exc), model_name=model_name
                 )
                 if failure_reason == "key_rate_limited":
-                    # Не спим: следующий ключ свежий, врач ждёт.
+                    if provider == "gemini" and is_gcp_project_quota_error(err_msg):
+                        logger.warning(
+                            "GCP project quota exhausted: skipping remaining Gemini keys, moving to fallback provider."
+                        )
+                        break
+                    # Ликвидация 429 stampede: обязательная пауза не менее 2.5-3.0 сек перед переходом к следующему ключу
+                    rate_sleep = 2.5
+                    if deadline is not None:
+                        rate_sleep = min(rate_sleep, max(0.0, deadline - time.monotonic() - MIN_REQUEST_SECONDS))
+                    if rate_sleep > 0:
+                        logger.info(
+                            f"{provider.capitalize()} key rate limited (429); pausing {rate_sleep:.1f}s before trying next key."
+                        )
+                        _sleep_with_status(rate_sleep, status_context, attempt + 1, max_attempts, key_id)
                     continue
 
                 if failure_reason in ("model_overloaded", "model_not_found"):

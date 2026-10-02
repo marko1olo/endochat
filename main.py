@@ -641,6 +641,44 @@ def resolve_report_targets():
     return targets
 
 
+# [SYS-RESILIENCE] Защита от шторма ретраев планировщика (макс 3 попытки на дату, затем откладывание на 2+ часа)
+summary_fail_count = {}
+summary_retry_after = {}
+
+
+def _handle_summary_failure(kind: str, current_dt: datetime):
+    cur_date = current_dt.date()
+    k_key = (kind, cur_date)
+    cnt = summary_fail_count.get(k_key, 0) + 1
+    summary_fail_count[k_key] = cnt
+    summary_fail_count[kind] = cnt
+    summary_fail_count[cur_date] = summary_fail_count.get(cur_date, 0) + 1
+
+    if cnt >= 3:
+        retry_at = current_dt + timedelta(hours=2)
+        summary_retry_after[k_key] = retry_at
+        summary_retry_after[kind] = retry_at
+        summary_retry_after[cur_date] = retry_at
+        logger.critical(
+            "🚨 CRITICAL: Рассылка %s завершилась сбоем %d раз на дату %s! "
+            "Превышен лимит (3 попытки на дату). Следующая попытка отложена минимум на 2 часа до %s во избежание исчерпания суточных квот RPD.",
+            kind.upper(), cnt, cur_date, retry_at
+        )
+    else:
+        logger.warning(
+            "⚠️ Рассылка %s завершилась сбоем (попытка %d/3) на дату %s.",
+            kind.upper(), cnt, cur_date
+        )
+
+
+def _clear_summary_failure(kind: str, current_dt: datetime):
+    cur_date = current_dt.date()
+    summary_fail_count.pop((kind, cur_date), None)
+    summary_fail_count.pop(kind, None)
+    summary_retry_after.pop((kind, cur_date), None)
+    summary_retry_after.pop(kind, None)
+
+
 async def scheduler_task(bot_client):
     """Рассылка по всем целям из конфига."""
     targets = resolve_report_targets()
@@ -659,177 +697,200 @@ async def scheduler_task(bot_client):
             now = datetime.now()
 
             # 1. ЕЖЕДНЕВНЫЙ ДАЙДЖЕСТ (Daily)
+            daily_key = ("daily", now.date())
+            daily_retry_time = summary_retry_after.get(daily_key) or summary_retry_after.get("daily")
+            daily_backoff_active = daily_retry_time and now < daily_retry_time
+
             # Проверка времени (REPORT_HOUR) и того, что сегодня еще не отправляли
-            if now.hour >= config.REPORT_HOUR and last_sent_date != now.date():
+            if now.hour >= config.REPORT_HOUR and last_sent_date != now.date() and not daily_backoff_active:
+                try:
+                    # Окно: от конца прошлого выпуска (либо 20:00 вчера) до сейчас.
+                    end_time = now
+                    start_time = daily_window_start(now, last_sent_date)
+                    logger.info(
+                        "Daily окно: %s -> %s (last_sent=%s)",
+                        start_time, end_time, last_sent_date,
+                    )
 
-                # Окно: от конца прошлого выпуска (либо 20:00 вчера) до сейчас.
-                end_time = now
-                start_time = daily_window_start(now, last_sent_date)
-                logger.info(
-                    "Daily окно: %s -> %s (last_sent=%s)",
-                    start_time, end_time, last_sent_date,
-                )
-
-                messages = await asyncio.wait_for(
-                    database.get_messages_for_daily_summary(start_time, end_time, min_count=100),
-                    timeout=30,
-                )
-                
-                if messages:
-                    logger.info(f"🔥 Daily контент готов ({len(messages)} шт). Рассылка...")
+                    messages = await asyncio.wait_for(
+                        database.get_messages_for_daily_summary(start_time, end_time, min_count=100),
+                        timeout=30,
+                    )
                     
-                    # Кэш для текста (чтобы генерировать 1 раз на все чаты).
-                    #
-                    # Он обязан переживать круг цикла. Пока generated_cache
-                    # создавался здесь заново, сломанная цель означала ПОЛНУЮ
-                    # повторную генерацию каждые 10 минут: last_sent_date не
-                    # продвигается, пока не доставлено во все цели, поэтому
-                    # следующий заход снова шёл в генерацию — платный вызов LLM
-                    # и новая страница Telegraph на каждый круг, до полуночи.
-                    if daily_cache_date != now.date():
-                        daily_cache_date = now.date()
-                        daily_cache_text = None
-                    generated_cache = daily_cache_text
-                    sent_targets = load_sent_targets("daily", now.date())
-                    target_keys = [
-                        target_delivery_key(target.get('chat_id'), target.get('topic_id'))
-                        for target in targets
-                        if target.get('chat_id')
-                    ]
-
-                    # Проходим по всем целям
-                    for target in targets:
-                        tgt_chat = target.get('chat_id')
-                        tgt_topic = target.get('topic_id')
+                    if messages:
+                        logger.info(f"🔥 Daily контент готов ({len(messages)} шт). Рассылка...")
                         
-                        if not tgt_chat: continue
-                        tgt_key = target_delivery_key(tgt_chat, tgt_topic)
-                        if tgt_key in sent_targets:
-                            logger.info("Daily target already delivered; skip duplicate target=%s", tgt_key)
-                            continue
-                        
-                        try:
-                            logger.info(f"📤 Отправка Daily в {tgt_chat} (Topic: {tgt_topic})...")
+                        # Кэш для текста (чтобы генерировать 1 раз на все чаты).
+                        #
+                        # Он обязан переживать круг цикла. Пока generated_cache
+                        # создавался здесь заново, сломанная цель означала ПОЛНУЮ
+                        # повторную генерацию каждые 10 минут: last_sent_date не
+                        # продвигается, пока не доставлено во все цели, поэтому
+                        # следующий заход снова шёл в генерацию — платный вызов LLM
+                        # и новая страница Telegraph на каждый круг, до полуночи.
+                        if daily_cache_date != now.date():
+                            daily_cache_date = now.date()
+                            daily_cache_text = None
+                        generated_cache = daily_cache_text
+                        sent_targets = load_sent_targets("daily", now.date())
+                        target_keys = [
+                            target_delivery_key(target.get('chat_id'), target.get('topic_id'))
+                            for target in targets
+                            if target.get('chat_id')
+                        ]
 
-                            async def daily_delivery_hook(sent_message, target_key=tgt_key):
-                                sent_targets.add(target_key)
-                                mark_target_delivered(
-                                    "daily",
-                                    now.date(),
-                                    target_key,
-                                    last_sent_date,
-                                    last_weekly_date,
-                                    getattr(sent_message, "id", None),
-                                )
-
-                            # Передаем кэш и сохраняем результат
-                            result_text = await summarizer.process_summary_batch(
-                                messages,
-                                bot_client,
-                                chat_id=tgt_chat,
-                                topic_id=tgt_topic,
-                                msg_count=len(messages),
-                                cached_message=generated_cache,
-                                delivery_hook=daily_delivery_hook,
-                            )
+                        # Проходим по всем целям
+                        for target in targets:
+                            tgt_chat = target.get('chat_id')
+                            tgt_topic = target.get('topic_id')
                             
-                            # Если генерация прошла успешно, запоминаем текст для следующих кругов
-                            if result_text:
-                                if tgt_key not in sent_targets:
-                                    sent_targets.add(tgt_key)
-                                    mark_target_delivered("daily", now.date(), tgt_key, last_sent_date, last_weekly_date)
-                                if not generated_cache:
-                                    generated_cache = result_text
-                                    daily_cache_text = result_text
+                            if not tgt_chat: continue
+                            tgt_key = target_delivery_key(tgt_chat, tgt_topic)
+                            if tgt_key in sent_targets:
+                                logger.info("Daily target already delivered; skip duplicate target=%s", tgt_key)
+                                continue
+                            
+                            try:
+                                logger.info(f"📤 Отправка Daily в {tgt_chat} (Topic: {tgt_topic})...")
 
-                        except Exception:
-                            logger.exception(f"Daily send failed chat={tgt_chat}")
-                    
-                    if target_keys and all(target_key in sent_targets for target_key in target_keys):
-                        # Помечаем сообщения прочитанными 1 раз после всех рассылок
-                        msg_ids = [m[0] for m in messages]
-                        await asyncio.wait_for(database.mark_messages_as_summarized(msg_ids), timeout=30)
+                                async def daily_delivery_hook(sent_message, target_key=tgt_key):
+                                    sent_targets.add(target_key)
+                                    mark_target_delivered(
+                                        "daily",
+                                        now.date(),
+                                        target_key,
+                                        last_sent_date,
+                                        last_weekly_date,
+                                        getattr(sent_message, "id", None),
+                                    )
+
+                                # Передаем кэш и сохраняем результат
+                                result_text = await summarizer.process_summary_batch(
+                                    messages,
+                                    bot_client,
+                                    chat_id=tgt_chat,
+                                    topic_id=tgt_topic,
+                                    msg_count=len(messages),
+                                    cached_message=generated_cache,
+                                    delivery_hook=daily_delivery_hook,
+                                )
+                                
+                                # Если генерация прошла успешно, запоминаем текст для следующих кругов
+                                if result_text:
+                                    if tgt_key not in sent_targets:
+                                        sent_targets.add(tgt_key)
+                                        mark_target_delivered("daily", now.date(), tgt_key, last_sent_date, last_weekly_date)
+                                    if not generated_cache:
+                                        generated_cache = result_text
+                                        daily_cache_text = result_text
+
+                            except Exception:
+                                logger.exception(f"Daily send failed chat={tgt_chat}")
                         
-                        last_sent_date = now.date()
-                        save_scheduler_state(last_sent_date, last_weekly_date)
-                        logger.info("✅ Ежедневная рассылка завершена.")
-                    else:
-                        missing_targets = [target_key for target_key in target_keys if target_key not in sent_targets]
-                        logger.error("Daily was not delivered to all targets; missing=%s messages remain unsummarized.", missing_targets)
+                        if target_keys and all(target_key in sent_targets for target_key in target_keys):
+                            # Помечаем сообщения прочитанными 1 раз после всех рассылок
+                            msg_ids = [m[0] for m in messages]
+                            await asyncio.wait_for(database.mark_messages_as_summarized(msg_ids), timeout=30)
+                            
+                            last_sent_date = now.date()
+                            save_scheduler_state(last_sent_date, last_weekly_date)
+                            _clear_summary_failure("daily", now)
+                            logger.info("✅ Ежедневная рассылка завершена.")
+                        else:
+                            missing_targets = [target_key for target_key in target_keys if target_key not in sent_targets]
+                            logger.error("Daily was not delivered to all targets; missing=%s messages remain unsummarized.", missing_targets)
+                            _handle_summary_failure("daily", now)
+                except Exception as daily_err:
+                    logger.exception("Daily summary cycle failed with exception: %s", daily_err)
+                    _handle_summary_failure("daily", now)
 
             # 2. ЕЖЕНЕДЕЛЬНАЯ ГАЗЕТА (Weekly)
+            weekly_key = ("weekly", now.date())
+            weekly_retry_time = summary_retry_after.get(weekly_key) or summary_retry_after.get("weekly")
+            weekly_backoff_active = weekly_retry_time and now < weekly_retry_time
+
             # Запуск: Понедельник (weekday == 0), 10:00 утра — либо догон, если
             # понедельник был пропущен (см. weekly_report_due).
-            if weekly_report_due(now, last_weekly_date):
-                logger.info(
-                    "🗞 Наступило время Weekly отчета (weekday=%s, last_weekly=%s)...",
-                    now.weekday(), last_weekly_date,
-                )
+            if weekly_report_due(now, last_weekly_date) and not weekly_backoff_active:
+                try:
+                    logger.info(
+                        "🗞 Наступило время Weekly отчета (weekday=%s, last_weekly=%s)...",
+                        now.weekday(), last_weekly_date,
+                    )
 
-                # Период: последние 7 полных дней, с догоном по last_weekly_date
-                end_weekly = now
-                start_weekly = weekly_window_start(now, last_weekly_date)
+                    # Период: последние 7 полных дней, с догоном по last_weekly_date
+                    end_weekly = now
+                    start_weekly = weekly_window_start(now, last_weekly_date)
 
-                # Получаем сообщения за диапазон
-                weekly_messages = await asyncio.wait_for(
-                    database.get_messages_for_range(start_weekly, end_weekly),
-                    timeout=30,
-                )
-                
-                if weekly_messages:
-                    logger.info(f"💎 Weekly контент готов ({len(weekly_messages)} шт). Рассылка...")
-                    weekly_sent_targets = load_sent_targets("weekly", now.date())
-                    weekly_target_keys = [
-                        target_delivery_key(target.get('chat_id'), target.get('topic_id'))
-                        for target in targets
-                        if target.get('chat_id')
-                    ]
-                     
-                    for target in targets:
-                        tgt_chat = target.get('chat_id')
-                        tgt_topic = target.get('topic_id')
-                        
-                        if not tgt_chat: continue
-                        tgt_key = target_delivery_key(tgt_chat, tgt_topic)
-                        if tgt_key in weekly_sent_targets:
-                            logger.info("Weekly target already delivered; skip duplicate target=%s", tgt_key)
-                            continue
+                    # Получаем сообщения за диапазон
+                    weekly_messages = await asyncio.wait_for(
+                        database.get_messages_for_range(start_weekly, end_weekly),
+                        timeout=30,
+                    )
+                    
+                    if weekly_messages:
+                        logger.info(f"💎 Weekly контент готов ({len(weekly_messages)} шт). Рассылка...")
+                        weekly_sent_targets = load_sent_targets("weekly", now.date())
+                        weekly_cache_text = None
+                        weekly_target_keys = [
+                            target_delivery_key(target.get('chat_id'), target.get('topic_id'))
+                            for target in targets
+                            if target.get('chat_id')
+                        ]
                          
-                        try:
-                            logger.info(f"📤 Отправка Weekly в {tgt_chat} (Topic: {tgt_topic})...")
+                        for target in targets:
+                            tgt_chat = target.get('chat_id')
+                            tgt_topic = target.get('topic_id')
+                            
+                            if not tgt_chat: continue
+                            tgt_key = target_delivery_key(tgt_chat, tgt_topic)
+                            if tgt_key in weekly_sent_targets:
+                                logger.info("Weekly target already delivered; skip duplicate target=%s", tgt_key)
+                                continue
+                             
+                            try:
+                                logger.info(f"📤 Отправка Weekly в {tgt_chat} (Topic: {tgt_topic})...")
 
-                            async def weekly_delivery_hook(sent_message, target_key=tgt_key):
-                                weekly_sent_targets.add(target_key)
-                                mark_target_delivered(
-                                    "weekly",
-                                    now.date(),
-                                    target_key,
-                                    last_sent_date,
-                                    last_weekly_date,
-                                    getattr(sent_message, "id", None),
+                                async def weekly_delivery_hook(sent_message, target_key=tgt_key):
+                                    weekly_sent_targets.add(target_key)
+                                    mark_target_delivered(
+                                        "weekly",
+                                        now.date(),
+                                        target_key,
+                                        last_sent_date,
+                                        last_weekly_date,
+                                        getattr(sent_message, "id", None),
+                                    )
+
+                                result_text = await summarizer.process_weekly_batch(
+                                    weekly_messages,
+                                    bot_client,
+                                    chat_id=tgt_chat,
+                                    topic_id=tgt_topic,
+                                    delivery_hook=weekly_delivery_hook,
+                                    cached_message=weekly_cache_text,
                                 )
-
-                            result_text = await summarizer.process_weekly_batch(
-                                weekly_messages,
-                                bot_client,
-                                chat_id=tgt_chat,
-                                topic_id=tgt_topic,
-                                delivery_hook=weekly_delivery_hook,
-                            )
-                            if result_text:
-                                if tgt_key not in weekly_sent_targets:
-                                    weekly_sent_targets.add(tgt_key)
-                                    mark_target_delivered("weekly", now.date(), tgt_key, last_sent_date, last_weekly_date)
-                        except Exception:
-                            logger.exception(f"Weekly send failed chat={tgt_chat}")
-                     
-                    if weekly_target_keys and all(target_key in weekly_sent_targets for target_key in weekly_target_keys):
-                        last_weekly_date = now.date()
-                        save_scheduler_state(last_sent_date, last_weekly_date)
-                        logger.info("✅ Еженедельная рассылка (Weekly) завершена.")
-                    else:
-                        missing_targets = [target_key for target_key in weekly_target_keys if target_key not in weekly_sent_targets]
-                        logger.error("Weekly was not delivered to all targets; missing=%s scheduler state not advanced.", missing_targets)
+                                if result_text:
+                                    if tgt_key not in weekly_sent_targets:
+                                        weekly_sent_targets.add(tgt_key)
+                                        mark_target_delivered("weekly", now.date(), tgt_key, last_sent_date, last_weekly_date)
+                                    if not weekly_cache_text:
+                                        weekly_cache_text = result_text
+                            except Exception:
+                                logger.exception(f"Weekly send failed chat={tgt_chat}")
+                         
+                        if weekly_target_keys and all(target_key in weekly_sent_targets for target_key in weekly_target_keys):
+                            last_weekly_date = now.date()
+                            save_scheduler_state(last_sent_date, last_weekly_date)
+                            _clear_summary_failure("weekly", now)
+                            logger.info("✅ Еженедельная рассылка (Weekly) завершена.")
+                        else:
+                            missing_targets = [target_key for target_key in weekly_target_keys if target_key not in weekly_sent_targets]
+                            logger.error("Weekly was not delivered to all targets; missing=%s scheduler state not advanced.", missing_targets)
+                            _handle_summary_failure("weekly", now)
+                except Exception as weekly_err:
+                    logger.exception("Weekly summary cycle failed with exception: %s", weekly_err)
+                    _handle_summary_failure("weekly", now)
 
             # 3. ЕЖЕДНЕВНЫЙ КЛИНИЧЕСКИЙ ОПРОС / КВИЗ (Daily Poll: 13:30 MSK)
             msk_tz = timezone(timedelta(hours=3))

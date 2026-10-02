@@ -3,6 +3,7 @@ import contextlib
 import copy
 from datetime import datetime, timedelta
 import html
+import inspect
 import json
 import logging
 import math
@@ -1942,7 +1943,7 @@ _CORPUS_MAX_CHARS = 12000
 _CORPUS_ENTRY_MAX_CHARS = 2500
 
 
-def _rank_corpus_entries(entries, keywords):
+def _rank_corpus_entries(entries, keywords, max_chars=_CORPUS_MAX_CHARS, output_limit=_CORPUS_OUTPUT_LIMIT):
     """
     Сортирует найденные фрагменты по числу РАЗНЫХ ключевых слов запроса,
     стоматологические веса выше. Фрагменты, содержащие несколько ключевых
@@ -1984,10 +1985,10 @@ def _rank_corpus_entries(entries, keywords):
     # не отдаём пустую справку: при пустом корпусе вызывающий вообще молчит.
     strong = [s for s in scored if s[1] >= 2]
     chosen = strong if len(strong) >= 3 else scored
-    return _fit_corpus_budget(s[3] for s in chosen[:_CORPUS_OUTPUT_LIMIT])
+    return _fit_corpus_budget((s[3] for s in chosen[:output_limit]), max_chars=max_chars)
 
 
-def _fit_corpus_budget(entries):
+def _fit_corpus_budget(entries, max_chars=_CORPUS_MAX_CHARS):
     """
     Укладывает справку в бюджет по СИМВОЛАМ, а не только по числу строк.
 
@@ -2014,12 +2015,13 @@ def _fit_corpus_budget(entries):
     out = []
     used = 0
     for entry in entries:
-        if len(entry) > _CORPUS_ENTRY_MAX_CHARS:
-            entry = _clip_at_sentence(entry, _CORPUS_ENTRY_MAX_CHARS)
+        entry_limit = min(_CORPUS_ENTRY_MAX_CHARS, max_chars)
+        if len(entry) > entry_limit:
+            entry = _clip_at_sentence(entry, entry_limit)
         # Записи склеиваются через "\n", и разделитель тоже занимает место:
         # без его учёта корпус выходил за бюджет на число строк минус одна.
         cost = len(entry) + (1 if out else 0)
-        if used + cost > _CORPUS_MAX_CHARS and out:
+        if used + cost > max_chars and out:
             break
         out.append(entry)
         used += cost
@@ -2159,7 +2161,7 @@ def _corpus_body_key(body):
 _WIKI_WAL_READY = False
 _ARCHIVE_WAL_READY = False
 
-async def search_knowledge_corpus(keywords):
+async def search_knowledge_corpus(keywords, query_text=""):
     if not keywords:
         return "", ""
 
@@ -2265,8 +2267,38 @@ async def search_knowledge_corpus(keywords):
                 except Exception as e:
                     logger.error(f"Error searching stomat_archive.db: {e}")
 
-            wiki_corpus = "\n".join(_rank_corpus_entries(wiki_facts, keywords)) if wiki_facts else ""
-            archive_corpus = "\n".join(_rank_corpus_entries(archive_msgs, keywords)) if archive_msgs else ""
+            # Адаптивный размер RAG:
+            # Если в запросе мало ключевых слов (keyword_count <= 2) или вопрос короткий (< 40 символов),
+            # ограничиваем суммарный RAG-контекст 2500–3000 символами (8-10 строк) вместо 24 000!
+            # Для больших развернутых кейсов оставляем полный бюджет (_CORPUS_MAX_CHARS = 12000 на каждый корпус).
+            kw_count = len(keywords)
+            q_len = len(query_text.strip()) if query_text else 0
+            is_compact = (kw_count <= 2) or (0 < q_len < 40)
+
+            if is_compact:
+                if wiki_facts and archive_msgs:
+                    wiki_limit = 1500
+                    archive_limit = 1500
+                    wiki_rows = 5
+                    archive_rows = 5
+                elif wiki_facts:
+                    wiki_limit = 2800
+                    archive_limit = 0
+                    wiki_rows = 9
+                    archive_rows = 0
+                else:
+                    wiki_limit = 0
+                    archive_limit = 2800
+                    wiki_rows = 0
+                    archive_rows = 9
+            else:
+                wiki_limit = _CORPUS_MAX_CHARS
+                archive_limit = _CORPUS_MAX_CHARS
+                wiki_rows = _CORPUS_OUTPUT_LIMIT
+                archive_rows = _CORPUS_OUTPUT_LIMIT
+
+            wiki_corpus = "\n".join(_rank_corpus_entries(wiki_facts, keywords, max_chars=wiki_limit, output_limit=wiki_rows)) if wiki_facts else ""
+            archive_corpus = "\n".join(_rank_corpus_entries(archive_msgs, keywords, max_chars=archive_limit, output_limit=archive_rows)) if archive_msgs else ""
             return wiki_corpus, archive_corpus
         except Exception as e:
             logger.error(f"Error in sync_search: {e}")
@@ -2278,6 +2310,21 @@ async def search_knowledge_corpus(keywords):
     except Exception as e:
         logger.error(f"Error in search_knowledge_corpus: {e}")
         return "", ""
+
+
+async def _safe_search_knowledge_corpus(keywords, query_text=""):
+    """
+    Вызывает search_knowledge_corpus с query_text, если целевая функция принимает этот аргумент,
+    либо с одним аргументом keywords (для полной обратной совместимости с тестами и одноаргументными моками).
+    """
+    fn = search_knowledge_corpus
+    try:
+        sig = inspect.signature(fn)
+        if "query_text" in sig.parameters or len(sig.parameters) >= 2 or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()):
+            return await fn(keywords, query_text=query_text)
+    except Exception:
+        pass
+    return await fn(keywords)
 
 
 _DYNAMIC_WEB_TRIGGER_RE = re.compile(
@@ -3489,56 +3536,192 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
     context_msgs = []
     is_dialogue = False
     pending_thread_id = None  # помечается обработанным только после успешной отправки
+    active_dialogue_keys = []
+    try:
     
-    # Try dynamic BOT_ID resolution if it is missing
-    if reply_to_msg_id and not BOT_ID:
-        if await resolve_bot_identity(bot_client):
-            logger.info(f"Dynamically resolved BOT_ID: {BOT_ID} (@{BOT_USERNAME})")
+        # Try dynamic BOT_ID resolution if it is missing
+        if reply_to_msg_id and not BOT_ID:
+            if await resolve_bot_identity(bot_client):
+                logger.info(f"Dynamically resolved BOT_ID: {BOT_ID} (@{BOT_USERNAME})")
 
-    # 1. Check Dialogue Reaction or Thread Continuation with Bot
-    if reply_to_msg_id and BOT_ID:
-        try:
-            # Проверяем прямого родителя через Telegram client, если доступен
-            direct_parent = None
-            if hasattr(event, 'client') and event.client:
-                try:
-                    direct_parent = await event.client.get_messages(event.chat_id, ids=reply_to_msg_id)
-                except Exception:
-                    pass
+        # 1. Check Dialogue Reaction or Thread Continuation with Bot
+        if reply_to_msg_id and BOT_ID:
+            try:
+                # Проверяем прямого родителя через Telegram client, если доступен
+                direct_parent = None
+                if hasattr(event, 'client') and event.client:
+                    try:
+                        direct_parent = await event.client.get_messages(event.chat_id, ids=reply_to_msg_id)
+                    except Exception:
+                        pass
 
-            is_parent_bot = False
-            if direct_parent and getattr(direct_parent, 'sender_id', None) == BOT_ID:
-                is_parent_bot = True
-            else:
-                try:
-                    if await database.is_bot_message_or_sender(reply_to_msg_id, BOT_ID, event.chat_id):
-                        is_parent_bot = True
-                except Exception:
-                    pass
+                is_parent_bot = False
+                if direct_parent and getattr(direct_parent, 'sender_id', None) == BOT_ID:
+                    is_parent_bot = True
+                else:
+                    try:
+                        if await database.is_bot_message_or_sender(reply_to_msg_id, BOT_ID, event.chat_id):
+                            is_parent_bot = True
+                    except Exception:
+                        pass
 
-            # Используем DB-based fetch вместо Telegram API walk (было: range(6) x get_messages).
-            # fetch_dynamic_chat_context возвращает до max_limit=40 реплик по reply-цепочке.
-            chain, bot_msg_count, nearest_bot_msg_id = await fetch_dynamic_chat_context(
-                msg_id, reply_to_msg_id, base_limit=12, max_limit=40, event=event
-            )
-            if is_parent_bot:
-                if bot_msg_count == 0:
-                    bot_msg_count = 1
-                if not nearest_bot_msg_id:
-                    nearest_bot_msg_id = reply_to_msg_id
-                found_bot_in_chain = True
-            else:
-                # Прямой родитель — не бот (врач отвечает человеку, а не боту).
-                # Нельзя признавать ветку диалогом с ботом только потому, что бот когда-то
-                # ответил в этой ветке 40 сообщений назад.
-                # В чужой ветке между людьми found_bot_in_chain сбрасываем, чтобы
-                # не порождать ложные 'Dialogue reply is stale' и не перехватывать треды.
-                found_bot_in_chain = False
+                # Используем DB-based fetch вместо Telegram API walk (было: range(6) x get_messages).
+                # fetch_dynamic_chat_context возвращает до max_limit=40 реплик по reply-цепочке.
+                chain, bot_msg_count, nearest_bot_msg_id = await fetch_dynamic_chat_context(
+                    msg_id, reply_to_msg_id, base_limit=12, max_limit=40, event=event
+                )
+                if is_parent_bot:
+                    if bot_msg_count == 0:
+                        bot_msg_count = 1
+                    if not nearest_bot_msg_id:
+                        nearest_bot_msg_id = reply_to_msg_id
+                    found_bot_in_chain = True
+                else:
+                    # Прямой родитель — не бот (врач отвечает человеку, а не боту).
+                    # Нельзя признавать ветку диалогом с ботом только потому, что бот когда-то
+                    # ответил в этой ветке 40 сообщений назад.
+                    # В чужой ветке между людьми found_bot_in_chain сбрасываем, чтобы
+                    # не порождать ложные 'Dialogue reply is stale' и не перехватывать треды.
+                    found_bot_in_chain = False
 
-            if found_bot_in_chain and bot_msg_count < MAX_DIALOGUE_BOT_REPLIES:
-                ref_id = nearest_bot_msg_id or reply_to_msg_id
-                resolved_thread_id = ref_id
-                sender_id = getattr(event, "sender_id", None)
+                if found_bot_in_chain and bot_msg_count < MAX_DIALOGUE_BOT_REPLIES:
+                    ref_id = nearest_bot_msg_id or reply_to_msg_id
+                    resolved_thread_id = ref_id
+                    sender_id = getattr(event, "sender_id", None)
+
+                    # Fast-fail entrance in-flight check:
+                    if (event.chat_id, resolved_thread_id) in _ACTIVE_DIALOGUE_THREADS or (sender_id and (event.chat_id, sender_id) in _ACTIVE_DIALOGUE_THREADS):
+                        logger.info(
+                            f"In-flight dialogue lock: thread {resolved_thread_id} or sender {sender_id} is already generating a reply. Skipping duplicate."
+                        )
+                        return False
+
+                    # [TOCTOU FIX] Lock immediately before slow DB queries & async triage!
+                    active_dialogue_keys.append((event.chat_id, resolved_thread_id))
+                    _ACTIVE_DIALOGUE_THREADS.add((event.chat_id, resolved_thread_id))
+                    if sender_id:
+                        active_dialogue_keys.append((event.chat_id, sender_id))
+                        _ACTIVE_DIALOGUE_THREADS.add((event.chat_id, sender_id))
+
+                    # Fast-fail entrance debounce: execute debounce checks on (chat_id, resolved_thread_id) and (chat_id, sender_id)
+                    # BEFORE the slow async LLM triage (check_dialogue_continuation_triage).
+                    dialogue_cd = check_user_cooldown(event.chat_id, resolved_thread_id, "dialogue_thread", seconds=DIALOGUE_THREAD_DEBOUNCE_SECONDS)
+                    user_dialogue_cd = check_user_cooldown(event.chat_id, sender_id, "dialogue_sender", seconds=DIALOGUE_THREAD_DEBOUNCE_SECONDS) if sender_id else 0
+                    if dialogue_cd > 0 or user_dialogue_cd > 0:
+                        logger.info(
+                            f"Dialogue entrance debounce: thread {resolved_thread_id} / sender {sender_id} triggered too quickly (thread_cd={dialogue_cd}s, user_cd={user_dialogue_cd}s). Skipping to prevent double-reply race condition."
+                        )
+                        return False
+
+                    is_dialogue = True
+                
+                    # Check for criticism / negative feedback from user
+                    if is_negative_feedback(text):
+                        logger.warning(f"Negative feedback detected in dialogue reply: '{text}'. Silencing bot.")
+                        state["silenced_until"] = (datetime.now() + timedelta(hours=4)).isoformat()
+                        save_state(state)
+                        apology = "Понял, умолкаю. Если понадоблюсь — позовите."
+                        await event.reply(apology)
+                        REPLIED_MSG_IDS[msg_id] = True
+                        return True
+
+                    # Проверяем "свежесть" диалога.
+                    # Для прямого Reply на сообщение бота (is_parent_bot) даем врачу широкое окно:
+                    # до 30 сообщений в чате или до 180–240 минут (3–4 часа на операцию, лечение или прием).
+                    # Для косвенных ответов в чужой ветке сохраняем строгий лимит (5 сообщений / 20 минут).
+                    ref_id = nearest_bot_msg_id or reply_to_msg_id
+                    max_allowed_msgs = 30 if is_parent_bot else 5
+
+                    try:
+                        msgs_since = await query_db_async(
+                            "SELECT COUNT(*) FROM messages WHERE msg_id > ? AND msg_id < 90000000",
+                            (ref_id,)
+                        )
+                        count_since = msgs_since[0][0] if msgs_since else 0
+                    except Exception as db_err:
+                        logger.error(f"Error checking message distance: {db_err}")
+                        count_since = 0
+
+                    if count_since > max_allowed_msgs:
+                        logger.info(
+                            f"Dialogue reply is stale by message count ({count_since} > {max_allowed_msgs}) "
+                            f"since ref_msg {ref_id} (is_parent_bot={is_parent_bot}). Skipping to avoid thread hijacking."
+                        )
+                        return False
+
+                    # Расчет допустимого времени: для прямых ответов боту при спокойном чате (<= 10 сообщений)
+                    # даем до 4 часов (240 мин), при умеренной активности — до 3 часов (180 мин).
+                    if is_parent_bot:
+                        max_allowed_minutes = 240.0 if count_since <= 10 else 180.0
+                    else:
+                        max_allowed_minutes = 20.0
+
+                    # Проверка по времени исходного сообщения
+                    try:
+                        ref_date_row = await query_db_async(
+                            "SELECT date FROM messages WHERE msg_id = ?",
+                            (ref_id,)
+                        )
+                        if ref_date_row and ref_date_row[0][0]:
+                            ref_dt = _parse_db_date(ref_date_row[0][0])
+                            elapsed_min = (datetime.utcnow() - ref_dt).total_seconds() / 60.0
+                            if elapsed_min > max_allowed_minutes:
+                                logger.info(
+                                    f"Dialogue reply is stale by time ({elapsed_min:.1f}m > {max_allowed_minutes}m) "
+                                    f"since ref_msg {ref_id} (is_parent_bot={is_parent_bot}). Skipping."
+                                )
+                                return False
+                    except Exception as time_err:
+                        logger.error(f"Error checking message age for ref_id {ref_id}: {time_err}")
+
+                    # Умный анализ продолжения диалога через триаж
+                    recent_group_db = await database.get_last_n_messages(limit=5)
+                    recent_group_texts = []
+                    if recent_group_db:
+                        for r in recent_group_db:
+                            if isinstance(r, (list, tuple)) and len(r) > 3:
+                                sender_name = r[1] or "Участник"
+                                msg_text = r[3] or ""
+                                if msg_text:
+                                    recent_group_texts.append(f"{sender_name}: {msg_text}")
+                    should_continue = await check_dialogue_continuation_triage(chain, recent_group_texts)
+                    if not should_continue:
+                        logger.info(f"Dialogue triage rejected continuation for chain with {bot_msg_count} bot replies. Stopping.")
+                        return False
+                    logger.info(f"Triage approved dialogue continuation (bot_msg_count={bot_msg_count}).")
+                
+                    triggered = True
+                    trigger_reason = f"Dialogue continuation in thread with bot message {ref_id} (bot_msg_count={bot_msg_count})"
+                    context_msgs = chain
+            except Exception as e:
+                logger.error(f"Error checking dialogue chain: {e}")
+
+        # 1.1. Check Sequential Follow-up from recent case author (when doctor types without Reply button)
+        if not is_dialogue and not reply_to_msg_id:
+            last_case_author = state.get("last_case_author_id")
+            last_case_bot_msg = state.get("last_case_bot_msg_id")
+            last_case_time = _parse_state_dt(state.get("last_case_time"))
+            sender_id = getattr(event, "sender_id", None)
+        
+            if (
+                last_case_author 
+                and sender_id == last_case_author 
+                and (datetime.now() - last_case_time) < timedelta(minutes=10)
+            ):
+                # Проверяем критику / негативный фидбек от автора кейса
+                if is_negative_feedback(text):
+                    logger.warning(f"Negative feedback detected in sequential follow-up: '{text}'. Silencing bot.")
+                    state["silenced_until"] = (datetime.now() + timedelta(hours=4)).isoformat()
+                    save_state(state)
+                    apology = "Понял, умолкаю. Если понадоблюсь — позовите."
+                    await event.reply(apology)
+                    REPLIED_MSG_IDS[msg_id] = True
+                    return True
+
+                # Canonical thread ID calculation: when is_dialogue is True and reply_to_msg_id is None,
+                # canonicalize the thread key to the active dialogue anchor (state.get("last_case_bot_msg_id"))
+                # instead of falling back to raw msg_id.
+                resolved_thread_id = last_case_bot_msg or msg_id
 
                 # Fast-fail entrance in-flight check:
                 if (event.chat_id, resolved_thread_id) in _ACTIVE_DIALOGUE_THREADS or (sender_id and (event.chat_id, sender_id) in _ACTIVE_DIALOGUE_THREADS):
@@ -3546,6 +3729,13 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
                         f"In-flight dialogue lock: thread {resolved_thread_id} or sender {sender_id} is already generating a reply. Skipping duplicate."
                     )
                     return False
+
+                # [TOCTOU FIX] Lock immediately before slow DB queries & async triage!
+                active_dialogue_keys.append((event.chat_id, resolved_thread_id))
+                _ACTIVE_DIALOGUE_THREADS.add((event.chat_id, resolved_thread_id))
+                if sender_id:
+                    active_dialogue_keys.append((event.chat_id, sender_id))
+                    _ACTIVE_DIALOGUE_THREADS.add((event.chat_id, sender_id))
 
                 # Fast-fail entrance debounce: execute debounce checks on (chat_id, resolved_thread_id) and (chat_id, sender_id)
                 # BEFORE the slow async LLM triage (check_dialogue_continuation_triage).
@@ -3556,315 +3746,191 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
                         f"Dialogue entrance debounce: thread {resolved_thread_id} / sender {sender_id} triggered too quickly (thread_cd={dialogue_cd}s, user_cd={user_dialogue_cd}s). Skipping to prevent double-reply race condition."
                     )
                     return False
-
-                is_dialogue = True
-                
-                # Check for criticism / negative feedback from user
-                if is_negative_feedback(text):
-                    logger.warning(f"Negative feedback detected in dialogue reply: '{text}'. Silencing bot.")
-                    state["silenced_until"] = (datetime.now() + timedelta(hours=4)).isoformat()
-                    save_state(state)
-                    apology = "Понял, умолкаю. Если понадоблюсь — позовите."
-                    await event.reply(apology)
-                    REPLIED_MSG_IDS[msg_id] = True
-                    return True
-
-                # Проверяем "свежесть" диалога.
-                # Для прямого Reply на сообщение бота (is_parent_bot) даем врачу широкое окно:
-                # до 30 сообщений в чате или до 180–240 минут (3–4 часа на операцию, лечение или прием).
-                # Для косвенных ответов в чужой ветке сохраняем строгий лимит (5 сообщений / 20 минут).
-                ref_id = nearest_bot_msg_id or reply_to_msg_id
-                max_allowed_msgs = 30 if is_parent_bot else 5
-
                 try:
+                    ref_id = last_case_bot_msg or 0
                     msgs_since = await query_db_async(
                         "SELECT COUNT(*) FROM messages WHERE msg_id > ? AND msg_id < 90000000",
                         (ref_id,)
                     )
                     count_since = msgs_since[0][0] if msgs_since else 0
-                except Exception as db_err:
-                    logger.error(f"Error checking message distance: {db_err}")
+                except Exception:
                     count_since = 0
 
-                if count_since > max_allowed_msgs:
-                    logger.info(
-                        f"Dialogue reply is stale by message count ({count_since} > {max_allowed_msgs}) "
-                        f"since ref_msg {ref_id} (is_parent_bot={is_parent_bot}). Skipping to avoid thread hijacking."
+                if count_since <= 5:
+                    # Используем fetch_dynamic_chat_context: единый формат, корректные имена и тексты
+                    recent_chain, bot_in_chain_count, _ = await fetch_dynamic_chat_context(
+                        msg_id, None, base_limit=12, max_limit=12, event=event
                     )
-                    return False
+                    if bot_in_chain_count < MAX_DIALOGUE_BOT_REPLIES and recent_chain:
+                        should_continue = await check_dialogue_continuation_triage(recent_chain, recent_chain[-3:])
+                        if should_continue:
+                            logger.info("Triage approved sequential follow-up from case author %s", event.sender_id)
+                            is_dialogue = True
+                            triggered = True
+                            trigger_reason = f"Sequential follow-up from case author {event.sender_id}"
+                            context_msgs = recent_chain
+            
+        # Cooldown gate for all passive text triggers (прямые обращения сюда не попадают).
+        # fromisoformat здесь раньше стоял без обработки — битый таймстамп в состоянии
+        # ронял весь обработчик сообщения.
+        if not is_dialogue:
+            block_reason = await passive_gate_block_reason_async(state)
+            if block_reason:
+                # info, а не debug: корневой уровень журнала — INFO, поэтому debug не
+                # эмитится НИКОГДА. Замер по всем журналам на диске (126 340 строк):
+                # строка «Passive text trigger suppressed» встречается 0 раз. При этом
+                # кулдаун закрыт большую часть суток и отбрасывает почти все
+                # сообщения — то есть это статистически главная причина, по которой
+                # бот в чате молчит, и она была ненаблюдаема вообще. Все соседние
+                # ветки того же решения (тишина, устаревший диалог, отказ триажа,
+                # пустой корпус, IGNORE, отказ рецензента) пишутся на INFO — выпадал
+                # ровно кулдаун. Отличить штатный кулдаун от застрявшего состояния
+                # было нельзя без чтения assistant_state.json руками.
+                logger.info("Passive text trigger suppressed: %s", block_reason)
+                return False
 
-                # Расчет допустимого времени: для прямых ответов боту при спокойном чате (<= 10 сообщений)
-                # даем до 4 часов (240 мин), при умеренной активности — до 3 часов (180 мин).
-                if is_parent_bot:
-                    max_allowed_minutes = 240.0 if count_since <= 10 else 180.0
-                else:
-                    max_allowed_minutes = 20.0
+        # 2. Check Reply Thread Reaction
+        if not triggered and reply_to_msg_id:
+            # Check if parent has media
+            parent_rows = await query_db_async("SELECT has_media, text FROM messages WHERE msg_id = ?", (reply_to_msg_id,))
+            if parent_rows and bool(parent_rows[0][0]):
+                # Count replies
+                reply_count_rows = await query_db_async("SELECT COUNT(*) FROM messages WHERE reply_to_msg_id = ?", (reply_to_msg_id,))
+                reply_count = reply_count_rows[0][0] if reply_count_rows else 0
+            
+                if reply_count >= 3 and reply_to_msg_id not in state.get("processed_threads", []):
+                    # Заявка на слот незваного ответа. И гейт кулдауна (выше), и
+                    # processed_threads (строкой выше) прочитаны из state, взятого
+                    # до нескольких await'ов, а списываются они только в
+                    # record_passive_attempt/record_passive_success. Две реплики
+                    # одной ветки, попавшие в это окно, обе видели гейт открытым и
+                    # обе доходили до отправки — два ответа в одну ветку. Замер:
+                    # 3 такие пары в окне 2 с и 105 в окне 60 с за 1016 суток архива.
+                    #
+                    # Ключ один и общий, не по ветке: и last_passive_text_run, и
+                    # processed_threads — глобальные ключи состояния, одно окно
+                    # тишины на весь чат. Заявка по ветке была бы вторым ключом,
+                    # который в поведении неотличим от этого, — то есть ровно та
+                    # мёртвая защита, от которой мы избавляемся в REPLIED_MSG_IDS.
+                    #
+                    # Заявка отказывает сразу, а не ждёт: второй ответ в ту же
+                    # ветку не нужен, и держать за ним входящее сообщение на всю
+                    # генерацию (90 с) незачем.
+                    if not claim_passive_slot(("passive_text",)):
+                        return False
+                    # We have a discussion under a clinical post!
+                    triggered = True
+                    trigger_reason = f"Clinical post {reply_to_msg_id} discussion thread (reply_count={reply_count})"
+                    # Тред помечается обработанным и полное окно списывается только
+                    # после успешной отправки (record_passive_success ниже). Здесь
+                    # ставим лишь короткий backoff, чтобы соседние сообщения треда
+                    # не запускали генерацию параллельно (now moved after triage).
+                    pending_thread_id = reply_to_msg_id
 
-                # Проверка по времени исходного сообщения
-                try:
-                    ref_date_row = await query_db_async(
-                        "SELECT date FROM messages WHERE msg_id = ?",
-                        (ref_id,)
+                    # Fetch parent + last replies for context
+                    rows = await query_db_async(
+                        "SELECT sender_name, text, msg_id, reply_to_msg_id FROM messages WHERE msg_id = ? OR reply_to_msg_id = ? ORDER BY date ASC",
+                        (reply_to_msg_id, reply_to_msg_id)
                     )
-                    if ref_date_row and ref_date_row[0][0]:
-                        ref_dt = _parse_db_date(ref_date_row[0][0])
-                        elapsed_min = (datetime.utcnow() - ref_dt).total_seconds() / 60.0
-                        if elapsed_min > max_allowed_minutes:
-                            logger.info(
-                                f"Dialogue reply is stale by time ({elapsed_min:.1f}m > {max_allowed_minutes}m) "
-                                f"since ref_msg {ref_id} (is_parent_bot={is_parent_bot}). Skipping."
-                            )
-                            return False
-                except Exception as time_err:
-                    logger.error(f"Error checking message age for ref_id {ref_id}: {time_err}")
+                    context_msgs = []
+                    for r in rows:
+                        rep_str = f" (в ответ на #{r[3]})" if r[3] else ""
+                        context_msgs.append(f"[Сообщение #{r[2]}{rep_str}] {r[0]}: {r[1]}")
+        # 2. Check Passive Trigger (General Chat Flow)
+        if not triggered:
+            # Используем fetch_dynamic_chat_context: base=12, max=40, gap=15 мин.
+            # Это заменяет: LIMIT 20 + ручное форматирование + thread-merge блок.
+            _passive_ctx, _, _ = await fetch_dynamic_chat_context(
+                msg_id, None, base_limit=12, max_limit=40, max_gap_minutes=15, event=event
+            )
+        
+            if _passive_ctx:
+                last_text = text or ""  # текущее сообщение уже известно
+            
+                # Fast local check: if the message has no dental terms, drop it immediately in Python without LLM triage
+                has_dental = has_dental_term(last_text)
 
-                # Умный анализ продолжения диалога через триаж
-                recent_group_db = await database.get_last_n_messages(limit=5)
-                recent_group_texts = []
-                if recent_group_db:
-                    for r in recent_group_db:
-                        if isinstance(r, (list, tuple)) and len(r) > 3:
-                            sender_name = r[1] or "Участник"
-                            msg_text = r[3] or ""
-                            if msg_text:
-                                recent_group_texts.append(f"{sender_name}: {msg_text}")
-                should_continue = await check_dialogue_continuation_triage(chain, recent_group_texts)
-                if not should_continue:
-                    logger.info(f"Dialogue triage rejected continuation for chain with {bot_msg_count} bot replies. Stopping.")
-                    return False
-                logger.info(f"Triage approved dialogue continuation (bot_msg_count={bot_msg_count}).")
-                
-                triggered = True
-                trigger_reason = f"Dialogue continuation in thread with bot message {ref_id} (bot_msg_count={bot_msg_count})"
-                context_msgs = chain
-        except Exception as e:
-            logger.error(f"Error checking dialogue chain: {e}")
+                # Pre-filter: block only OBVIOUS garbage before paying for LLM triage call
+                is_obviously_junk = (
+                    last_text.startswith("/") or
+                    len(last_text.strip()) < 8 or
+                    not any(c.isalpha() for c in last_text) or
+                    not has_dental
+                )
+            
+                passive_cooldown_active = (await passive_gate_block_reason_async(load_state())) is not None
 
-    # 1.1. Check Sequential Follow-up from recent case author (when doctor types without Reply button)
-    if not is_dialogue and not reply_to_msg_id:
-        last_case_author = state.get("last_case_author_id")
-        last_case_bot_msg = state.get("last_case_bot_msg_id")
-        last_case_time = _parse_state_dt(state.get("last_case_time"))
+                if not is_obviously_junk and not passive_cooldown_active:
+                    if not claim_passive_slot(("passive_text",)):
+                        return False
+                    triggered = True
+                    trigger_reason = "Passive trigger (pending LLM triage)"
+                    context_msgs = _passive_ctx
+
+
+        # Триаж проходят ВСЕ незваные срабатывания, включая ветку клинического поста.
+        #
+        # Здесь стояло исключение: `and not (reply_to_msg_id and "discussion thread"
+        # in trigger_reason)`. Посылка была такая — если под постом со снимком уже
+        # три ответа, обсуждение заведомо клиническое, и платить за триаж незачем.
+        # Замер по архиву эту посылку опровергает.
+        #
+        # Точный повтор логики ветки на 117 847 репликах, с оба кулдауна и
+        # processed_threads: условию удовлетворяют 4075 реплик, после подавления
+        # обработанных тредов остаётся 891 РЕАЛЬНОЕ вторжение (0.88 в сутки), и из
+        # них 472 — 53% — не содержат ни одного стоматологического слова. Вот на что
+        # бот отвечал бы клинической лекцией, не спросив себя, уместно ли это:
+        #   «Спасибо вам большое! 🔥🤩», «Я щас уточню», «Смекаю)»,
+        #   «Техник рукастый», «Бинго) Или как там?! Фулхаус))», «Вивисекция».
+        #
+        # Условие ветки — «у родителя есть медиа И под ним 3 ответа» — ничего не
+        # говорит о содержании этих ответов. Коллеги хвалят чей-то снимок, третье
+        # «Спасибо» выполняет счётчик, и бот вешает лекцию в чужую ветку. Ни
+        # check_llm_triage, чей промпт целиком про «пользователи НЕ любят, когда бот
+        # лезет в их разговор», ни даже дешёвый отсев очевидного мусора на этот путь
+        # не распространялись. Поздний предохранитель почти не работает: гард пустого
+        # корпуса снимает 8 случаев из 891, потому что на 117 847 реплик хоть что-то
+        # находится почти на любое русское слово.
+        #
+        # Цена правки: 0.88 дополнительного триажа в сутки. Цена бездействия: бот
+        # влезает в разговор коллег примерно раз в сутки, и в половине случаев
+        # разговор даже не про стоматологию.
+        if triggered and not is_dialogue:
+            # Fast local dental check BEFORE calling check_llm_triage:
+            if not has_dental_term(text or ""):
+                logger.info("Message has no dental keywords. Dropping immediately without LLM triage.")
+                return False
+
+            should_reply = await check_llm_triage(context_msgs)
+            if not should_reply:
+                logger.info("LLM triage decided NOT to reply. Cancelling trigger and setting passive backoff.")
+                record_passive_attempt()
+                return False
+            record_passive_attempt()
+
+        if not triggered:
+            return False
+
+        # Per-user group flood gate: защита от исчерпания токенов при спаме тегами @bot.
+        # Ограничивает одного пользователя 1 триггером в 8 секунд (не затрагивает активный диалог).
         sender_id = getattr(event, "sender_id", None)
-        
-        if (
-            last_case_author 
-            and sender_id == last_case_author 
-            and (datetime.now() - last_case_time) < timedelta(minutes=10)
-        ):
-            # Проверяем критику / негативный фидбек от автора кейса
-            if is_negative_feedback(text):
-                logger.warning(f"Negative feedback detected in sequential follow-up: '{text}'. Silencing bot.")
-                state["silenced_until"] = (datetime.now() + timedelta(hours=4)).isoformat()
-                save_state(state)
-                apology = "Понял, умолкаю. Если понадоблюсь — позовите."
-                await event.reply(apology)
-                REPLIED_MSG_IDS[msg_id] = True
-                return True
-
-            # Canonical thread ID calculation: when is_dialogue is True and reply_to_msg_id is None,
-            # canonicalize the thread key to the active dialogue anchor (state.get("last_case_bot_msg_id"))
-            # instead of falling back to raw msg_id.
-            resolved_thread_id = last_case_bot_msg or msg_id
-
-            # Fast-fail entrance in-flight check:
-            if (event.chat_id, resolved_thread_id) in _ACTIVE_DIALOGUE_THREADS or (sender_id and (event.chat_id, sender_id) in _ACTIVE_DIALOGUE_THREADS):
-                logger.info(
-                    f"In-flight dialogue lock: thread {resolved_thread_id} or sender {sender_id} is already generating a reply. Skipping duplicate."
+        if sender_id and not is_dialogue:
+            sender_flood_cd = check_user_cooldown(event.chat_id, sender_id, "group_trigger", seconds=8)
+            if sender_flood_cd > 0:
+                logger.warning(
+                    f"Group trigger flood limit: user {sender_id} triggered too quickly ({sender_flood_cd}s left). Skipping."
                 )
                 return False
 
-            # Fast-fail entrance debounce: execute debounce checks on (chat_id, resolved_thread_id) and (chat_id, sender_id)
-            # BEFORE the slow async LLM triage (check_dialogue_continuation_triage).
-            dialogue_cd = check_user_cooldown(event.chat_id, resolved_thread_id, "dialogue_thread", seconds=DIALOGUE_THREAD_DEBOUNCE_SECONDS)
-            user_dialogue_cd = check_user_cooldown(event.chat_id, sender_id, "dialogue_sender", seconds=DIALOGUE_THREAD_DEBOUNCE_SECONDS) if sender_id else 0
-            if dialogue_cd > 0 or user_dialogue_cd > 0:
-                logger.info(
-                    f"Dialogue entrance debounce: thread {resolved_thread_id} / sender {sender_id} triggered too quickly (thread_cd={dialogue_cd}s, user_cd={user_dialogue_cd}s). Skipping to prevent double-reply race condition."
-                )
-                return False
-            try:
-                ref_id = last_case_bot_msg or 0
-                msgs_since = await query_db_async(
-                    "SELECT COUNT(*) FROM messages WHERE msg_id > ? AND msg_id < 90000000",
-                    (ref_id,)
-                )
-                count_since = msgs_since[0][0] if msgs_since else 0
-            except Exception:
-                count_since = 0
+        # In-flight task registry & active dialogue lock:
+        # Защита от параллельной генерации в один тред или от одного автора.
+        if is_dialogue:
+            thread_root_id = reply_to_msg_id or state.get("last_case_bot_msg_id") or msg_id
+            for k in [(event.chat_id, thread_root_id)] + ([(event.chat_id, sender_id)] if sender_id else []):
+                if k not in active_dialogue_keys:
+                    active_dialogue_keys.append(k)
+                    _ACTIVE_DIALOGUE_THREADS.add(k)
 
-            if count_since <= 5:
-                # Используем fetch_dynamic_chat_context: единый формат, корректные имена и тексты
-                recent_chain, bot_in_chain_count, _ = await fetch_dynamic_chat_context(
-                    msg_id, None, base_limit=12, max_limit=12, event=event
-                )
-                if bot_in_chain_count < MAX_DIALOGUE_BOT_REPLIES and recent_chain:
-                    should_continue = await check_dialogue_continuation_triage(recent_chain, recent_chain[-3:])
-                    if should_continue:
-                        logger.info("Triage approved sequential follow-up from case author %s", event.sender_id)
-                        is_dialogue = True
-                        triggered = True
-                        trigger_reason = f"Sequential follow-up from case author {event.sender_id}"
-                        context_msgs = recent_chain
-            
-    # Cooldown gate for all passive text triggers (прямые обращения сюда не попадают).
-    # fromisoformat здесь раньше стоял без обработки — битый таймстамп в состоянии
-    # ронял весь обработчик сообщения.
-    if not is_dialogue:
-        block_reason = await passive_gate_block_reason_async(state)
-        if block_reason:
-            # info, а не debug: корневой уровень журнала — INFO, поэтому debug не
-            # эмитится НИКОГДА. Замер по всем журналам на диске (126 340 строк):
-            # строка «Passive text trigger suppressed» встречается 0 раз. При этом
-            # кулдаун закрыт большую часть суток и отбрасывает почти все
-            # сообщения — то есть это статистически главная причина, по которой
-            # бот в чате молчит, и она была ненаблюдаема вообще. Все соседние
-            # ветки того же решения (тишина, устаревший диалог, отказ триажа,
-            # пустой корпус, IGNORE, отказ рецензента) пишутся на INFO — выпадал
-            # ровно кулдаун. Отличить штатный кулдаун от застрявшего состояния
-            # было нельзя без чтения assistant_state.json руками.
-            logger.info("Passive text trigger suppressed: %s", block_reason)
-            return False
-
-    # 2. Check Reply Thread Reaction
-    if not triggered and reply_to_msg_id:
-        # Check if parent has media
-        parent_rows = await query_db_async("SELECT has_media, text FROM messages WHERE msg_id = ?", (reply_to_msg_id,))
-        if parent_rows and bool(parent_rows[0][0]):
-            # Count replies
-            reply_count_rows = await query_db_async("SELECT COUNT(*) FROM messages WHERE reply_to_msg_id = ?", (reply_to_msg_id,))
-            reply_count = reply_count_rows[0][0] if reply_count_rows else 0
-            
-            if reply_count >= 3 and reply_to_msg_id not in state.get("processed_threads", []):
-                # Заявка на слот незваного ответа. И гейт кулдауна (выше), и
-                # processed_threads (строкой выше) прочитаны из state, взятого
-                # до нескольких await'ов, а списываются они только в
-                # record_passive_attempt/record_passive_success. Две реплики
-                # одной ветки, попавшие в это окно, обе видели гейт открытым и
-                # обе доходили до отправки — два ответа в одну ветку. Замер:
-                # 3 такие пары в окне 2 с и 105 в окне 60 с за 1016 суток архива.
-                #
-                # Ключ один и общий, не по ветке: и last_passive_text_run, и
-                # processed_threads — глобальные ключи состояния, одно окно
-                # тишины на весь чат. Заявка по ветке была бы вторым ключом,
-                # который в поведении неотличим от этого, — то есть ровно та
-                # мёртвая защита, от которой мы избавляемся в REPLIED_MSG_IDS.
-                #
-                # Заявка отказывает сразу, а не ждёт: второй ответ в ту же
-                # ветку не нужен, и держать за ним входящее сообщение на всю
-                # генерацию (90 с) незачем.
-                if not claim_passive_slot(("passive_text",)):
-                    return False
-                # We have a discussion under a clinical post!
-                triggered = True
-                trigger_reason = f"Clinical post {reply_to_msg_id} discussion thread (reply_count={reply_count})"
-                # Тред помечается обработанным и полное окно списывается только
-                # после успешной отправки (record_passive_success ниже). Здесь
-                # ставим лишь короткий backoff, чтобы соседние сообщения треда
-                # не запускали генерацию параллельно (now moved after triage).
-                pending_thread_id = reply_to_msg_id
-
-                # Fetch parent + last replies for context
-                rows = await query_db_async(
-                    "SELECT sender_name, text, msg_id, reply_to_msg_id FROM messages WHERE msg_id = ? OR reply_to_msg_id = ? ORDER BY date ASC",
-                    (reply_to_msg_id, reply_to_msg_id)
-                )
-                context_msgs = []
-                for r in rows:
-                    rep_str = f" (в ответ на #{r[3]})" if r[3] else ""
-                    context_msgs.append(f"[Сообщение #{r[2]}{rep_str}] {r[0]}: {r[1]}")
-    # 2. Check Passive Trigger (General Chat Flow)
-    if not triggered:
-        # Используем fetch_dynamic_chat_context: base=12, max=40, gap=15 мин.
-        # Это заменяет: LIMIT 20 + ручное форматирование + thread-merge блок.
-        _passive_ctx, _, _ = await fetch_dynamic_chat_context(
-            msg_id, None, base_limit=12, max_limit=40, max_gap_minutes=15, event=event
-        )
-        
-        if _passive_ctx:
-            last_text = text or ""  # текущее сообщение уже известно
-            
-            # Pre-filter: block only OBVIOUS garbage before paying for LLM triage call
-            is_obviously_junk = (
-                last_text.startswith("/") or
-                len(last_text.strip()) < 8 or
-                not any(c.isalpha() for c in last_text)
-            )
-            
-            passive_cooldown_active = (await passive_gate_block_reason_async(load_state())) is not None
-
-            if not is_obviously_junk and not passive_cooldown_active:
-                if not claim_passive_slot(("passive_text",)):
-                    return False
-                triggered = True
-                trigger_reason = "Passive trigger (pending LLM triage)"
-                context_msgs = _passive_ctx
-
-
-    # Триаж проходят ВСЕ незваные срабатывания, включая ветку клинического поста.
-    #
-    # Здесь стояло исключение: `and not (reply_to_msg_id and "discussion thread"
-    # in trigger_reason)`. Посылка была такая — если под постом со снимком уже
-    # три ответа, обсуждение заведомо клиническое, и платить за триаж незачем.
-    # Замер по архиву эту посылку опровергает.
-    #
-    # Точный повтор логики ветки на 117 847 репликах, с оба кулдауна и
-    # processed_threads: условию удовлетворяют 4075 реплик, после подавления
-    # обработанных тредов остаётся 891 РЕАЛЬНОЕ вторжение (0.88 в сутки), и из
-    # них 472 — 53% — не содержат ни одного стоматологического слова. Вот на что
-    # бот отвечал бы клинической лекцией, не спросив себя, уместно ли это:
-    #   «Спасибо вам большое! 🔥🤩», «Я щас уточню», «Смекаю)»,
-    #   «Техник рукастый», «Бинго) Или как там?! Фулхаус))», «Вивисекция».
-    #
-    # Условие ветки — «у родителя есть медиа И под ним 3 ответа» — ничего не
-    # говорит о содержании этих ответов. Коллеги хвалят чей-то снимок, третье
-    # «Спасибо» выполняет счётчик, и бот вешает лекцию в чужую ветку. Ни
-    # check_llm_triage, чей промпт целиком про «пользователи НЕ любят, когда бот
-    # лезет в их разговор», ни даже дешёвый отсев очевидного мусора на этот путь
-    # не распространялись. Поздний предохранитель почти не работает: гард пустого
-    # корпуса снимает 8 случаев из 891, потому что на 117 847 реплик хоть что-то
-    # находится почти на любое русское слово.
-    #
-    # Цена правки: 0.88 дополнительного триажа в сутки. Цена бездействия: бот
-    # влезает в разговор коллег примерно раз в сутки, и в половине случаев
-    # разговор даже не про стоматологию.
-    if triggered and not is_dialogue:
-        # Backoff раньше стоял ДО триажа, из-за чего отказ триажа вешал
-        # бота в тишину на 10 минут. Теперь пишем только ПОСЛЕ успешного триажа.
-        should_reply = await check_llm_triage(context_msgs)
-        if not should_reply:
-            logger.info("LLM triage decided NOT to reply. Cancelling trigger.")
-            return False
-        record_passive_attempt()
-
-    if not triggered:
-        return False
-
-    # Per-user group flood gate: защита от исчерпания токенов при спаме тегами @bot.
-    # Ограничивает одного пользователя 1 триггером в 8 секунд (не затрагивает активный диалог).
-    sender_id = getattr(event, "sender_id", None)
-    if sender_id and not is_dialogue:
-        sender_flood_cd = check_user_cooldown(event.chat_id, sender_id, "group_trigger", seconds=8)
-        if sender_flood_cd > 0:
-            logger.warning(
-                f"Group trigger flood limit: user {sender_id} triggered too quickly ({sender_flood_cd}s left). Skipping."
-            )
-            return False
-
-    # In-flight task registry & active dialogue lock:
-    # Защита от параллельной генерации в один тред или от одного автора.
-    # [SYS-02 FIX] Ключи добавляем в множество СРАЗУ — до первого await,
-    # иначе параллельные сообщения в 3-6 секундном окне триажа обходят проверку.
-    active_dialogue_keys = []
-    if is_dialogue:
-        thread_root_id = reply_to_msg_id or state.get("last_case_bot_msg_id") or msg_id
-        active_dialogue_keys.append((event.chat_id, thread_root_id))
-        if sender_id:
-            active_dialogue_keys.append((event.chat_id, sender_id))
-        for k in active_dialogue_keys:
-            _ACTIVE_DIALOGUE_THREADS.add(k)
-
-    try:
         # Pre-LLM adversarial filter against jailbreaks & controlled substances
         is_adv, adv_refusal = check_adversarial_input(text)
         if is_adv:
@@ -3902,7 +3968,7 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
                     
 
         
-        wiki_corpus, archive_corpus = await search_knowledge_corpus(search_keywords)
+        wiki_corpus, archive_corpus = await _safe_search_knowledge_corpus(search_keywords, query_text=keyword_source)
         
         if not is_dialogue and not wiki_corpus and not archive_corpus:
             # If corpus is empty, do not output anything for passive chitchat (avoid generic AI fluff).
@@ -4230,7 +4296,7 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
 Вопрос врача:
 {text}
 """
-                ctx = {"kind": "dialogue_fallback", "thinking_level": "LOW"}
+                ctx = {"kind": "dialogue_fallback", "thinking_level": "MEDIUM"}
                 fb_resp, fb_err = await generate_gemini_text_async(fallback_prompt, ctx, timeout=20)
                 fb_text = getattr(fb_resp, "text", "") if fb_resp else ""
                 fb_text = clean_html_formatting(fb_text.strip()) if fb_text else ""
@@ -4463,7 +4529,7 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
         triggered = True
         trigger_reason = f"Dental media trigger (has_dental_topic={has_dental_topic})"
         is_dental = True
-        wiki_corpus, archive_corpus = await search_knowledge_corpus(search_keywords)
+        wiki_corpus, archive_corpus = await _safe_search_knowledge_corpus(search_keywords, query_text=caption_text or text)
     else:
         # Non-dental Meme/Screenshot/Coffee: Trigger chitchat only if NOT passive (direct reply/mention)
         if not is_passive:
@@ -4502,8 +4568,9 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
         ignore_instruction = "ЕСЛИ пользователь просто благодарит тебя, соглашается или тема исчерпана — НЕ МОЛЧИ (не пиши IGNORE), а вежливо и грамотно заверши диалог (например, 'Всегда пожалуйста!', 'Обращайтесь!'). Отвечать IGNORE при прямом обращении запрещено."
 
     # BUILD PROMPT
+    has_text_desc = bool(media_description and str(media_description).strip())
     multimodal_notice = ""
-    if image_urls:
+    if image_urls and not has_text_desc:
         multimodal_notice = """
 [МУЛЬТИМОДАЛЬНОЕ ЗРЕНИЕ: К твоему запросу прикреплено оригинальное изображение в высоком разрешении. Внимательно сопоставь описание модели зрения с реальным снимком, деталями рентгенограммы, анатомией зубов и клинической картиной. Опирайся в первую очередь на то, что ты реально видишь на прикрепленном снимке.]
 """
@@ -4617,7 +4684,7 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
     
     # CALL GEMINI
     status_ctx = {"kind": "assistant_media", "chat_id": event.chat_id, "thinking_level": "HIGH"}
-    if image_urls:
+    if image_urls and not has_text_desc:
         status_ctx["image_urls"] = image_urls
     response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=120)
     
@@ -4685,7 +4752,7 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
 Подпись или вопрос врача:
 {caption_text}
 """
-            ctx = {"kind": "media_fallback", "thinking_level": "LOW"}
+            ctx = {"kind": "media_fallback", "thinking_level": "MEDIUM"}
             fb_resp, fb_err = await generate_gemini_text_async(fallback_prompt, ctx, timeout=20)
             fb_text = getattr(fb_resp, "text", "") if fb_resp else ""
             fb_text = clean_html_formatting(fb_text.strip()) if fb_text else ""
@@ -9552,7 +9619,7 @@ async def handle_private_message(bot_client, event):
         if has_dental_topic or has_media or has_search_or_link_intent:
             # Ищем совпадения в стоматологической базе
             search_keywords = select_search_keywords(keywords)
-            wiki_corpus, archive_corpus = await search_knowledge_corpus(search_keywords)
+            wiki_corpus, archive_corpus = await _safe_search_knowledge_corpus(search_keywords, query_text=full_context_str)
 
         raw_chat_id = str(getattr(config, "SOURCE_CHAT_ID", "") or "")
         clean_chat_id = raw_chat_id[4:] if raw_chat_id.startswith("-100") else raw_chat_id.lstrip("-")
@@ -13316,18 +13383,35 @@ async def check_referee_triage(context_msgs):
 
 
 async def check_and_trigger_referee(bot_client, event, text):
-    if text and len(text) > 1500:
-        text = text[:1500] + "..."
+    if not ENABLE_REFEREE:
+        return
 
-    """Пассивный клинический рефери для предотвращения конфликтов."""
+    # 15-минутный кулдаун рефери проверяем НА САМОМ ВЕРХУ — ДО любых обращений к базе, сборки контекста и вызовов analyze_dispute_need / check_referee_triage
     global LAST_REFEREE_RUN
-    chat_id = event.chat_id
-    msg_id = event.message.id
-    
-    # 1. Проверяем тишину
+    now = datetime.now()
+    if now - LAST_REFEREE_RUN < timedelta(minutes=15):
+        logger.info("Referee in-memory cooldown: within 15 minutes. Skipping.")
+        return
+
     state = load_state()
     if is_silenced(state, "referee trigger"):
         return
+
+    last_referee_run_str = state.get("last_referee_run")
+    if last_referee_run_str:
+        try:
+            last_referee_run = datetime.fromisoformat(last_referee_run_str)
+            if now - last_referee_run < timedelta(minutes=15):
+                logger.info("Referee cooldown: within 15 minutes. Skipping.")
+                return
+        except Exception as cooldown_err:
+            logger.error(f"Error parsing last_referee_run: {cooldown_err}")
+
+    if text and len(text) > 1500:
+        text = text[:1500] + "..."
+
+    chat_id = event.chat_id
+    msg_id = getattr(getattr(event, "message", None), "id", None) or getattr(event, "id", None)
 
     text_lower = text.lower()
     
@@ -13420,17 +13504,7 @@ async def check_and_trigger_referee(bot_client, event, text):
         logger.info("Llama referee triage decided NOT to intervene. Cancelling referee trigger.")
         return
         
-    # Разрешаем интервенции не чаще одного раза в 15 минут
-    last_referee_run_str = state.get("last_referee_run")
-    if last_referee_run_str:
-        try:
-            last_referee_run = datetime.fromisoformat(last_referee_run_str)
-            if datetime.now() - last_referee_run < timedelta(minutes=15):
-                logger.info("Referee cooldown: within 15 minutes. Skipping.")
-                return
-        except Exception as cooldown_err:
-            logger.error(f"Error parsing last_referee_run: {cooldown_err}")
-        
+
     logger.info(f"Clinical Referee triggered for msg_id={msg_id} (toxic={has_conflict_kw}). Generating EBM arbitration...")
     style = "ebm_reconciliation"
     chain_str = "\n".join(chain_msgs) if chain_msgs else text
@@ -13491,8 +13565,10 @@ async def check_and_trigger_referee(bot_client, event, text):
             reply_to=msg_id,
             parse_mode='html'
         )
+        now_dt = datetime.now()
+        LAST_REFEREE_RUN = now_dt
         state = load_state()
-        state["last_referee_run"] = datetime.now().isoformat()
+        state["last_referee_run"] = now_dt.isoformat()
         save_state(state)
         logger.info(f"Referee intervention ({style}) successfully sent to chat_id={chat_id}")
     except Exception as e:

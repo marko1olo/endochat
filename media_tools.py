@@ -46,12 +46,12 @@ def _prepare_image_sync(file_path):
         except Exception as exc:
             return None, f"Невалидный файл изображения: {exc}"
 
-        max_size = 1000
+        max_size = 850
         if max(img.size) > max_size:
             img.thumbnail((max_size, max_size), Image.Resampling.LANCZOS)
 
         with io.BytesIO() as buffer:
-            img.save(buffer, format="JPEG", quality=85, optimize=True)
+            img.save(buffer, format="JPEG", quality=70, optimize=True)
             return buffer.getvalue(), None
     except Exception as exc:
         return None, f"Ошибка CPU обработки: {exc}"

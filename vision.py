@@ -198,6 +198,7 @@ def _load_vision_cache() -> dict:
 
 
 def _save_vision_cache(cache_data: dict) -> None:
+    tmp_path = None
     try:
         if len(cache_data) > VISION_CACHE_MAX_ENTRIES:
             sorted_items = sorted(
@@ -207,12 +208,30 @@ def _save_vision_cache(cache_data: dict) -> None:
             )
             cache_data = dict(sorted_items[:VISION_CACHE_MAX_ENTRIES])
 
-        tmp_path = VISION_CACHE_FILE + ".tmp"
+        # Unique tmp_path prevents collision between concurrent processes / threads
+        tmp_path = f"{VISION_CACHE_FILE}.{os.getpid()}_{time.time_ns()}_{random.randint(1000, 9999)}.tmp"
         with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump(cache_data, f, ensure_ascii=False, indent=2)
-        os.replace(tmp_path, VISION_CACHE_FILE)
+            f.flush()
+            os.fsync(f.fileno())
+
+        # Atomic replace with retry for Windows filesystem concurrency locks
+        for attempt in range(4):
+            try:
+                os.replace(tmp_path, VISION_CACHE_FILE)
+                break
+            except (PermissionError, OSError) as os_err:
+                if attempt == 3:
+                    raise os_err
+                time.sleep(0.02 * (attempt + 1))
     except Exception as e:
         logger.warning("Failed to persist vision cache to %s: %s", VISION_CACHE_FILE, e)
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
 
 
 def clear_vision_cache():
@@ -250,6 +269,51 @@ def get_recent_image_urls(key=None) -> list[str]:
     if _RECENT_IMAGE_URLS:
         return next(reversed(_RECENT_IMAGE_URLS.values()))
     return []
+
+
+async def _translate_description_to_russian(text: str, client: AsyncOpenAI = None, provider: str = None) -> str:
+    """
+    Быстрый легковесный перевод англоязычного описания на русский язык.
+    Исключает выброс готового описания снимка и повторный запуск тяжелого мультимодального каскада.
+    """
+    if not text:
+        return ""
+    translate_prompt = (
+        "Переведи следующее клиническое стоматологическое описание на профессиональный русский язык. "
+        "Сохраняй медицинскую терминологию (FDI номера зубов, анатомические структуры, рентгенологические термины). "
+        "Выведи ТОЛЬКО русский перевод без каких-либо комментариев, предисловий и тегов <think>:\n\n"
+        f"{text}"
+    )
+    if client and provider:
+        try:
+            trans_model = "gemini-3.5-flash-lite" if provider == "gemini" else "qwen/qwen3.8-27b"
+            resp = await client.chat.completions.create(
+                model=trans_model,
+                messages=[{"role": "user", "content": translate_prompt}],
+                max_tokens=1000,
+            )
+            raw = resp.choices[0].message.content if (resp.choices and len(resp.choices) > 0) else None
+            cleaned = gemini_client.strip_reasoning(raw)
+            if cleaned and _is_mostly_cyrillic(cleaned):
+                return cleaned
+        except Exception as exc:
+            logger.warning("Direct client translation failed: %s; falling back to blocking_tools", exc)
+
+    try:
+        import blocking_tools
+        res, err = await blocking_tools.generate_gemini_text_async(
+            translate_prompt,
+            {"kind": "llama_triage", "thinking_level": "LOW"},
+            timeout=15.0,
+        )
+        if res and getattr(res, "text", None):
+            cleaned = gemini_client.strip_reasoning(res.text)
+            if cleaned and _is_mostly_cyrillic(cleaned):
+                return cleaned
+    except Exception as exc:
+        logger.warning("blocking_tools translation failed: %s", exc)
+
+    return ""
 
 
 async def describe_image(file_paths, caption: str = None, is_passive: bool = False, use_cache: bool = True) -> str:
@@ -445,20 +509,31 @@ async def describe_image(file_paths, caption: str = None, is_passive: bool = Fal
                                     # русского чата, и отвечающая модель вынуждена
                                     # переводить чужой текст. Проверяем результат,
                                     # а не надеемся на послушание модели.
-                                    if _is_mostly_cyrillic(text):
+                                    russian_text = text
+                                    if not _is_mostly_cyrillic(text):
+                                        logger.info(
+                                            "Vision answered in non-Russian via %s (%s). Translating to Russian via lightweight call...",
+                                            provider, model_name,
+                                        )
+                                        translated = await _translate_description_to_russian(text, client, provider)
+                                        if translated:
+                                            russian_text = translated
+
+                                    if _is_mostly_cyrillic(russian_text):
                                         logger.info(f"Vision success via {provider} ({model_name})")
                                         gemini_client.note_success(provider, api_key, model_name=model_name)
-                                        _RECENT_IMAGE_URLS[text[:60]] = image_urls
+                                        _RECENT_IMAGE_URLS[russian_text[:60]] = image_urls
                                         if len(_RECENT_IMAGE_URLS) > 50:
                                             _RECENT_IMAGE_URLS.pop(next(iter(_RECENT_IMAGE_URLS)))
                                         if not skip_cache and cache_key:
-                                            _VISION_CACHE[cache_key] = {"text": text, "ts": time.time()}
+                                            _VISION_CACHE[cache_key] = {"text": russian_text, "ts": time.time()}
                                             _save_vision_cache(_VISION_CACHE)
-                                        return VisionDescription(text, image_urls=image_urls)
+                                        return VisionDescription(russian_text, image_urls=image_urls)
+
                                     if english_fallback is None:
                                         english_fallback = text
                                     logger.warning(
-                                        "Vision answered not in Russian via %s (%s); trying next model",
+                                        "Vision answered not in Russian and translation failed via %s (%s); trying next model",
                                         provider, model_name,
                                     )
                                     break
@@ -485,8 +560,13 @@ async def describe_image(file_paths, caption: str = None, is_passive: bool = Fal
                             # "500" находил его в "1500 tokens" и "500000 tokens",
                             # то есть обычная ошибка запроса выбрасывала модель
                             # из каскада как перегруженную.
-                            if gemini_client._SERVER_ERROR_RE.search(err_str) or "unavailable" in err_str:
-                                logger.warning(f"Vision {provider} server overloaded ({err_str}). Skipping model {model_name}.")
+                            if gemini_client._SERVER_ERROR_RE.search(err_str) or any(s in err_str for s in ("unavailable", "503", "504", "overload")):
+                                ban_duration = getattr(gemini_client, "MODEL_BAN_SECONDS", 1200)
+                                gemini_client.ban_model(model_name, ban_duration)
+                                logger.warning(
+                                    f"Vision {provider} server overloaded ({err_str}). "
+                                    f"Banning model {model_name} for {ban_duration}s."
+                                )
                                 break
                             if gemini_client._RATE_LIMIT_RE.search(err_str):
                                 # Кулдаун записываем в общий с текстовым каскадом

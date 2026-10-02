@@ -1091,7 +1091,7 @@ explanation_deep:
 }}
 """
 
-    status_ctx = {"kind": "poll_content_gen", "thinking_level": "HIGH"}
+    status_ctx = {"kind": "poll_content_gen", "thinking_level": "MEDIUM"}
     resp, err = await _call_llm_adapter(llm_caller, prompt, status_ctx, timeout=timeout)
     if err or not resp or not getattr(resp, "text", None):
         logger.warning("LLM content generation failed with error: %s", err)
@@ -1226,7 +1226,7 @@ async def review_poll_quality(
 {{"verdict": "REJECT", "defects": ["описание дефекта 1", "описание дефекта 2"]}}
 """
 
-    status_ctx = {"kind": "poll_clinical_review", "temperature": 0.2}
+    status_ctx = {"kind": "poll_clinical_review", "thinking_level": "HIGH", "temperature": 0.2}
     try:
         resp, err = await _call_llm_adapter(llm_caller, review_prompt, status_ctx, timeout=timeout)
     except Exception as exc:

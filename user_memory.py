@@ -92,14 +92,12 @@ def _extract_json_object(text: str) -> Optional[dict]:
     """
     Надёжный извлекатель JSON-объекта из произвольного текста LLM.
 
-    Обрабатывает три распространённых формата ответа:
+    Обрабатывает:
     1. ```json { ... } ``` — обёртка в code fence
     2. Текст до/после JSON-объекта
-    3. Вложенные фигурные скобки внутри JSON
-
-    Жадный re.search(r"{.*}", re.DOTALL) ломался, если LLM добавлял текст
-    после JSON или использовал несколько объектов — он захватывал
-    «{"a":1} и ещё {"b":2}» целиком, что невалидный JSON.
+    3. Вложенные фигурные и квадратные скобки внутри JSON
+    4. Truncation Guard: корректно закрывает обрезанные строки, массивы и объекты,
+       удаляя висячие запятые/двоеточия.
     """
     if not text:
         return None
@@ -113,12 +111,12 @@ def _extract_json_object(text: str) -> Optional[dict]:
         except (json.JSONDecodeError, ValueError):
             pass
 
-    # Шаг 2: ищем первый '{' и считаем скобки до закрывающей пары
+    # Шаг 2: ищем первый '{' и считаем скобки со стеком
     start = text.find("{")
     if start == -1:
         return None
 
-    depth = 0
+    stack = []
     in_string = False
     escape_next = False
     for i, ch in enumerate(text[start:], start=start):
@@ -134,33 +132,51 @@ def _extract_json_object(text: str) -> Optional[dict]:
         if in_string:
             continue
         if ch == "{":
-            depth += 1
-        elif ch == "}":
-            depth -= 1
-            if depth == 0:
+            stack.append("}")
+        elif ch == "[":
+            stack.append("]")
+        elif ch in ("}", "]"):
+            if stack and stack[-1] == ch:
+                stack.pop()
+            if not stack:
                 candidate = text[start : i + 1]
                 try:
                     return json.loads(candidate)
                 except (json.JSONDecodeError, ValueError):
-                    # Попробуем продолжить поиск следующего '{'
                     next_start = text.find("{", i + 1)
                     if next_start == -1:
                         return None
-                    # Рекурсивно ищем дальше (без бесконечной рекурсии — один уровень)
                     return _extract_json_object(text[next_start:])
 
-    # Truncation Guard: если ответ оборвался на середине (depth > 0)
-    if depth > 0:
-        repaired = text[start:]
+    # Truncation Guard: если ответ оборвался на середине (стек не пуст)
+    if stack:
+        repaired = text[start:].rstrip()
         if in_string:
             if repaired.endswith("\\"):
                 repaired = repaired[:-1]
             repaired += '"'
-        repaired += "}" * depth
+
+        suffix = "".join(reversed(stack))
         try:
-            return json.loads(repaired)
+            return json.loads(repaired + suffix)
         except (json.JSONDecodeError, ValueError):
             pass
+
+        # Если не закрылось напрямую (висячая запятая, незаконченный ключ/значение):
+        cleaned = re.sub(r',\s*$', '', repaired)
+        cleaned = re.sub(r':\s*$', '', cleaned)
+        cleaned = re.sub(r',\s*$', '', cleaned)
+        for k in range(len(stack), 0, -1):
+            sub_suffix = "".join(reversed(stack[:k]))
+            try:
+                return json.loads(cleaned + sub_suffix)
+            except (json.JSONDecodeError, ValueError):
+                pass
+            alt_cleaned = re.sub(r',\s*[^,\[\{\]]+$', '', cleaned)
+            try:
+                return json.loads(alt_cleaned + sub_suffix)
+            except (json.JSONDecodeError, ValueError):
+                pass
 
     return None
 
@@ -593,7 +609,7 @@ async def update_clinician_memory_async(
 }}
 """
 
-        status_ctx = {"kind": "daemon_memory", "thinking_level": "LOW", "max_tokens": 2048}
+        status_ctx = {"kind": "daemon_memory", "thinking_level": "MEDIUM", "max_tokens": 2048}
         response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=60)
 
         if error or not response or not getattr(response, "text", None):
@@ -742,7 +758,7 @@ async def process_group_memory_daemon_batch(min_new_messages: int = 3, limit: in
 }}
 """
 
-            status_ctx = {"kind": "daemon_memory", "thinking_level": "LOW", "max_tokens": 2048}
+            status_ctx = {"kind": "daemon_memory", "thinking_level": "MEDIUM", "max_tokens": 2048}
             response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=60)
 
             if error or not response or not getattr(response, "text", None):
