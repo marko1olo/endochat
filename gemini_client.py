@@ -511,20 +511,23 @@ def note_key_failure(provider, api_key, error_text, model_name=None):
         return "model_not_found"
 
     if "403" in err_msg or "permission" in err_msg or "forbidden" in err_msg:
-        # Проверяем, является ли это постоянным отказом самого API (отозванный/невалидный ключ)
-        # или транзиентным сетевым сбоем (прокси, Cloudflare, gateway).
-        is_api_permanent = any(m in err_msg for m in (
-            "api_key_invalid", "permission_denied", "consumer_invalid",
-            "key has been revoked", "unregistered_callers", "not registered"
-        ))
-        if is_api_permanent:
-            ban_duration = 31536000 if provider == "gemini" else 86400  # 365 days for google, 24h for groq
-            set_key_cooldown(provider, api_key, ban_duration)
-            logger.warning(f"{provider.capitalize()} key permanently denied by API ({err_msg[:120]}). Banned for {ban_duration}s.")
+        if provider == "gemini":
+            # Проверяем, является ли это постоянным отказом самого API (отозванный/невалидный ключ)
+            # или транзиентным сетевым сбоем (прокси, Cloudflare, gateway).
+            is_api_permanent = any(m in err_msg for m in (
+                "api_key_invalid", "permission_denied", "consumer_invalid",
+                "key has been revoked", "unregistered_callers", "not registered"
+            ))
+            if is_api_permanent:
+                ban_duration = 31536000  # 365 days for google
+                set_key_cooldown(provider, api_key, ban_duration)
+                logger.warning(f"{provider.capitalize()} key permanently denied by API ({err_msg[:120]}). Banned for {ban_duration}s.")
+            else:
+                # Транзиентный 403 от шлюза/прокси/Cloudflare — кулдаун максимум на 1 час (3600 с) вместо 1 года!
+                set_key_cooldown(provider, api_key, 3600)
+                logger.warning(f"{provider.capitalize()} key encountered transient 403/Forbidden (likely proxy/gateway). Temporary cooldown 3600s.")
         else:
-            # Транзиентный 403 от шлюза/прокси/Cloudflare — кулдаун максимум на 1 час (3600 с) вместо 1 года!
-            set_key_cooldown(provider, api_key, 3600)
-            logger.warning(f"{provider.capitalize()} key encountered transient 403/Forbidden (likely proxy/gateway). Temporary cooldown 3600s.")
+            logger.warning(f"{provider.capitalize()} key denied (403): {err_msg[:120]}")
         _record_failure("key_denied", error_text, api_key)
         return "key_denied"
 

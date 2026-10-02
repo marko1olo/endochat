@@ -5,6 +5,8 @@ import re
 import asyncio
 import time
 import os
+import json
+import hashlib
 import httpx
 from openai import AsyncOpenAI
 
@@ -178,6 +180,68 @@ class VisionDescription(str):
 
 _RECENT_IMAGE_URLS: dict[str, list[str]] = {}
 
+VISION_CACHE_FILE = os.getenv("STOMCHAT_VISION_CACHE_FILE", "vision_cache.json")
+VISION_CACHE_MAX_ENTRIES = 1000
+
+
+def _load_vision_cache() -> dict:
+    if not os.path.exists(VISION_CACHE_FILE):
+        return {}
+    try:
+        with open(VISION_CACHE_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            if isinstance(data, dict):
+                return data
+    except Exception as e:
+        logger.warning("Failed to load vision cache from %s: %s", VISION_CACHE_FILE, e)
+    return {}
+
+
+def _save_vision_cache(cache_data: dict) -> None:
+    try:
+        if len(cache_data) > VISION_CACHE_MAX_ENTRIES:
+            sorted_items = sorted(
+                cache_data.items(),
+                key=lambda item: item[1].get("ts", 0) if isinstance(item[1], dict) else 0,
+                reverse=True,
+            )
+            cache_data = dict(sorted_items[:VISION_CACHE_MAX_ENTRIES])
+
+        tmp_path = VISION_CACHE_FILE + ".tmp"
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(cache_data, f, ensure_ascii=False, indent=2)
+        os.replace(tmp_path, VISION_CACHE_FILE)
+    except Exception as e:
+        logger.warning("Failed to persist vision cache to %s: %s", VISION_CACHE_FILE, e)
+
+
+def clear_vision_cache():
+    """Сбрасывает кэш разбора изображений в памяти и на диске."""
+    global _VISION_CACHE
+    _VISION_CACHE.clear()
+    if os.path.exists(VISION_CACHE_FILE):
+        try:
+            os.remove(VISION_CACHE_FILE)
+        except OSError:
+            pass
+
+
+def get_vision_cache() -> dict:
+    """Возвращает текущий словарь кэша разбора изображений."""
+    return _VISION_CACHE
+
+
+_VISION_CACHE: dict = _load_vision_cache()
+
+
+def _compute_vision_cache_key(image_bytes_list: list[bytes], caption: str = None) -> str:
+    hasher = hashlib.sha256()
+    for b in image_bytes_list:
+        hasher.update(b)
+    norm_caption = (caption or "").strip()[:500]
+    hasher.update(norm_caption.encode("utf-8"))
+    return hasher.hexdigest()
+
 
 def get_recent_image_urls(key=None) -> list[str]:
     """Возвращает последние сохраненные image_urls."""
@@ -188,10 +252,12 @@ def get_recent_image_urls(key=None) -> list[str]:
     return []
 
 
-async def describe_image(file_paths, caption: str = None, is_passive: bool = False) -> str:
+async def describe_image(file_paths, caption: str = None, is_passive: bool = False, use_cache: bool = True) -> str:
     """Анализирует изображение(я) через каскад Vision (Gemini 3.5 -> Qwen 3.6 -> Llama 4 Scout)."""
     if isinstance(file_paths, str):
         file_paths = [file_paths]
+
+    skip_cache = (not use_cache) or any(not os.path.exists(fp) for fp in file_paths)
 
     async with _get_vision_semaphore():
         try:
@@ -199,6 +265,7 @@ async def describe_image(file_paths, caption: str = None, is_passive: bool = Fal
             # каскада не ответит по-русски, отдадим его, а не пустоту.
             english_fallback = None
             image_urls = []
+            image_bytes_list = []
             for fp in file_paths:
                 resized_bytes, error = await prepare_image_for_analysis(
                     fp,
@@ -207,11 +274,25 @@ async def describe_image(file_paths, caption: str = None, is_passive: bool = Fal
                 if error:
                     logger.warning("Vision image prep failed path=%s: %s", fp, error)
                 if not error and resized_bytes:
+                    image_bytes_list.append(resized_bytes)
                     image_urls.append(f"data:image/jpeg;base64,{base64.b64encode(resized_bytes).decode('utf-8')}")
 
             if not image_urls:
                 logger.error("Ошибка подготовки фото: ни одно фото не удалось обработать.")
                 return None
+
+            cache_key = None
+            if not skip_cache and image_bytes_list:
+                cache_key = _compute_vision_cache_key(image_bytes_list, caption)
+                if cache_key in _VISION_CACHE:
+                    cached_entry = _VISION_CACHE[cache_key]
+                    cached_text = cached_entry.get("text") if isinstance(cached_entry, dict) else str(cached_entry)
+                    if cached_text:
+                        logger.info("Vision cache hit for key=%s (%s images)", cache_key[:12], len(image_urls))
+                        _RECENT_IMAGE_URLS[cached_text[:60]] = image_urls
+                        if len(_RECENT_IMAGE_URLS) > 50:
+                            _RECENT_IMAGE_URLS.pop(next(iter(_RECENT_IMAGE_URLS)))
+                        return VisionDescription(cached_text, image_urls=image_urls)
 
             context = f" Контекст от автора: '{caption}'." if caption else ""
             # Описание снимка уходит в отвечающий промпт и становится основанием
@@ -336,7 +417,7 @@ async def describe_image(file_paths, caption: str = None, is_passive: bool = Fal
                                 timeout=GROQ_HTTP_TIMEOUT_SECONDS,
                             )
                             content_arr = [{"type": "text", "text": system_prompt}]
-                            max_images = 3 if provider == "groq" else len(image_urls)
+                            max_images = 3 if provider == "groq" else min(len(image_urls), 6)
                             for iu in image_urls[:max_images]:
                                 content_arr.append({"type": "image_url", "image_url": {"url": iu}})
                             
@@ -366,9 +447,13 @@ async def describe_image(file_paths, caption: str = None, is_passive: bool = Fal
                                     # а не надеемся на послушание модели.
                                     if _is_mostly_cyrillic(text):
                                         logger.info(f"Vision success via {provider} ({model_name})")
+                                        gemini_client.note_success(provider, api_key, model_name=model_name)
                                         _RECENT_IMAGE_URLS[text[:60]] = image_urls
                                         if len(_RECENT_IMAGE_URLS) > 50:
                                             _RECENT_IMAGE_URLS.pop(next(iter(_RECENT_IMAGE_URLS)))
+                                        if not skip_cache and cache_key:
+                                            _VISION_CACHE[cache_key] = {"text": text, "ts": time.time()}
+                                            _save_vision_cache(_VISION_CACHE)
                                         return VisionDescription(text, image_urls=image_urls)
                                     if english_fallback is None:
                                         english_fallback = text
@@ -387,6 +472,9 @@ async def describe_image(file_paths, caption: str = None, is_passive: bool = Fal
                                 )
                                 if english_fallback:
                                     _RECENT_IMAGE_URLS[english_fallback[:60]] = image_urls
+                                    if not skip_cache and cache_key:
+                                        _VISION_CACHE[cache_key] = {"text": english_fallback, "ts": time.time()}
+                                        _save_vision_cache(_VISION_CACHE)
                                     return VisionDescription(english_fallback, image_urls=image_urls)
                                 return None
                             if any(s in err_str for s in ("404", "not_found", "does not exist", "not found")):
@@ -404,7 +492,7 @@ async def describe_image(file_paths, caption: str = None, is_passive: bool = Fal
                                 # Кулдаун записываем в общий с текстовым каскадом
                                 # файл: иначе следующий же снимок снова уходит в
                                 # тот же исчерпанный ключ.
-                                gemini_client.set_key_cooldown(provider, api_key)
+                                gemini_client.note_key_failure(provider, api_key, str(e), model_name=model_name)
                                 logger.info(
                                     "Vision key rate limited (429); key placed on %ss cooldown.",
                                     gemini_client.KEY_COOLDOWN_SECONDS,
@@ -418,6 +506,9 @@ async def describe_image(file_paths, caption: str = None, is_passive: bool = Fal
                 # ответ, в котором снимок вообще не упомянут.
                 logger.warning("Vision: no Russian answer from cascade, using non-Russian description")
                 _RECENT_IMAGE_URLS[english_fallback[:60]] = image_urls
+                if not skip_cache and cache_key:
+                    _VISION_CACHE[cache_key] = {"text": english_fallback, "ts": time.time()}
+                    _save_vision_cache(_VISION_CACHE)
                 return VisionDescription(english_fallback, image_urls=image_urls)
             return None
 
