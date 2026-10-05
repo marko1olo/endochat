@@ -1057,6 +1057,141 @@ def calculate_anesthesia_instant(text: str) -> str | None:
     return "\n".join(out)
 
 
+def calculate_endo_instant(text: str) -> str | None:
+    """
+    Мгновенный клинический калькулятор эндодонтических параметров у кресла:
+    - Протокол ирригации NaOCl & EDTA (объёмы, подогрев, экспозиция, PUI/EDDY, запрет PCA).
+    - Конусность и диаметр файла (ISO Taper & Tip formula Dx = D0 + taper*x, Danger Zone).
+    - Торк и обороты эндомотора (RPM & Torque для ProTaper, WaveOne, Reciproc, SOCO, ультразвук).
+    """
+    if not text:
+        return None
+    lower = text.lower().strip()
+
+    # 1. Запрос протокола ирригации / NaOCl / EDTA
+    is_naocl = bool(
+        lower in ("naocl", "edta", "гипохлорит", "ирригация", "протокол naocl", "протокол ирригации", "/calc naocl") or
+        (re.search(r'\b(?:naocl|гипохлорит|эдта|edta)\b', lower) and re.search(r'\b(?:протокол|расчет|расчёт|объем|объём|активаци\w*|экспозици\w*|концентраци\w*)\b', lower)) or
+        re.search(r'\b(?:протокол\s+ирригации|ирригационный\s+протокол|активация\s+гипохлорита)\b', lower)
+    )
+    if is_naocl:
+        return (
+            "🧪 <b>Клинический протокол ирригации NaOCl & EDTA (EndoChat)</b>\n\n"
+            "📏 <b>1. Объёмы и концентрация:</b>\n"
+            "• <b>Гипохлорит натрия (NaOCl):</b> оптимально <b>3.0% – 5.25%</b>.\n"
+            "• <b>Критический объём:</b> не менее <b>15–20 мл</b> на один канал за визит.\n"
+            "• <b>Сменяемость раствора:</b> обновление каждые 1–2 минуты инструментации для поддержания пула активного свободного хлора (Cl⁻).\n\n"
+            "🔥 <b>2. Термоактивация и подогрев:</b>\n"
+            "• Подогрев NaOCl до <b>45–50°C</b> (в шприце/наконечнике) повышает растворяющую способность органики и антибактериальную активность против <i>E. faecalis</i> более чем в 100 раз.\n\n"
+            "⏳ <b>3. Смазанный слой (Smear Layer) — 17% EDTA:</b>\n"
+            "• Объём: 1–2 мл на канал.\n"
+            "• <b>Экспозиция: строго 60 секунд!</b>\n"
+            "• ⚠️ <i>Экспозиция EDTA более 120 секунд вызывает эрозию перитубулярного дентина и резкое снижение микротвердости стенок корня.</i>\n\n"
+            "🔊 <b>4. Протокол гидродинамической активации:</b>\n"
+            "• <b>Ультразвук (PUI):</b> 3 цикла по 20 секунд со свежей порцией раствора, насадка #15–#20 на 1–2 мм короче WL.\n"
+            "• <b>Звуковая активация (EDDY):</b> полиамидная гибкая насадка (28–30 кГц), 30–45 секунд на канал без риска повреждения апикального уступа.\n\n"
+            "☠️ <b>5. КАТЕГОРИЧЕСКИЙ ЗАПРЕТ (PCA):</b>\n"
+            "• <b>Никогда не смешивать NaOCl и Хлоргексидин 2%!</b>\n"
+            "• Образуется токсичный парахлоранилин (PCA) — канцерогенный буро-коричневый осадок, химически блокирующий дентинные канальцы.\n"
+            "• Перед хлоргексидином обязательно провести промежуточное промывание стерильным физраствором или спиртом 95%!"
+        )
+
+    # 2. Калькулятор конусности и калибра файла (ISO Taper & Tip)
+    taper_match = re.search(r'(?:#|\b)?(\d{2})\s*(?:[./,]\s*0?(\d{2})|\s+(?:0?[.,](\d{2})|(\d{1,2})%))\b', lower)
+    is_taper_query = bool(
+        lower in ("taper", "конусность", "калибр", "калькулятор конусности", "/calc taper") or
+        re.search(r'\b(?:конусност\w*|тейпер\w*|taper|диаметр\s+файла|калибр\s+файла)\b', lower) or
+        taper_match
+    )
+    if is_taper_query:
+        if taper_match:
+            try:
+                tip_num = int(taper_match.group(1))
+                t_str = taper_match.group(2) or taper_match.group(3) or taper_match.group(4)
+                if t_str:
+                    t_val = float(t_str)
+                    taper = (t_val / 100.0) if t_val > 0.1 else t_val
+                else:
+                    taper = 0.04
+                if 10 <= tip_num <= 80 and 0.01 <= taper <= 0.12:
+                    d0 = tip_num / 100.0
+                    d3 = d0 + taper * 3.0
+                    d5 = d0 + taper * 5.0
+                    d8 = d0 + taper * 8.0
+                    d12 = d0 + taper * 12.0
+                    d16 = d0 + taper * 16.0
+                    danger_warning = ""
+                    if taper >= 0.06:
+                        danger_warning = (
+                            "\n\n⚠️ <b>Предупреждение по Danger Zone:</b>\n"
+                            f"При конусности .{int(taper*100):02d} на уровне D8 диаметр достигает <b>{d8:.2f} мм</b>. "
+                            "В тонких мезиальных корнях нижних моляров остаточная толщина дентина (RDT) "
+                            "может упасть ниже критических 0.5 мм (высокий риск ленточной/strip-перфорации!). "
+                            "Рекомендуется ограничить конусность до <b>.04</b>."
+                        )
+                    return (
+                        f"📐 <b>Клинический расчёт инструмента #{tip_num} конусности .{int(taper*100):02d}</b>\n\n"
+                        f"📏 <b>Формула:</b> <code>D_x = {d0:.2f} + ({taper:.2f} × x)</code>\n\n"
+                        "📊 <b>Диаметры на критических уровнях:</b>\n"
+                        f"• <b>D₀ (кончик):</b> <b>{d0:.2f} мм</b> (ISO #{tip_num})\n"
+                        f"• <b>D₃ (апикальная треть):</b> <b>{d3:.2f} мм</b>\n"
+                        f"• <b>D₅ (граница изгиба):</b> <b>{d5:.2f} мм</b>\n"
+                        f"• <b>D₈ (средняя треть / опасная зона):</b> <b>{d8:.2f} мм</b>\n"
+                        f"• <b>D₁₂ (коронковая треть):</b> <b>{d12:.2f} мм</b>\n"
+                        f"• <b>D₁₆ (устьевой калибр):</b> <b>{d16:.2f} мм</b>"
+                        f"{danger_warning}"
+                    )
+            except Exception:
+                pass
+        return (
+            "📐 <b>Калькулятор конусности и калибра файла (ISO Taper & Tip)</b>\n\n"
+            "📏 <b>Универсальная формула диаметра:</b>\n"
+            "<code>D_x = D_0 + (Taper × x)</code>\n"
+            "<i>где D₀ — диаметр верхушки по ISO (в мм), Taper — конусность (.02, .04, .06), x — расстояние от верхушки в мм.</i>\n\n"
+            "📊 <b>Таблица диаметров рабочих инструментов:</b>\n"
+            "• <b>#25.04:</b> D₀ = 0.25 мм | D₃ = 0.37 мм | D₈ = 0.57 мм | D₁₆ = 0.89 мм\n"
+            "• <b>#25.06:</b> D₀ = 0.25 мм | D₃ = 0.43 мм | D₈ = 0.73 мм | D₁₆ = 1.21 мм\n"
+            "• <b>#30.04:</b> D₀ = 0.30 мм | D₃ = 0.42 мм | D₈ = 0.62 мм | D₁₆ = 0.94 мм\n"
+            "• <b>#30.06:</b> D₀ = 0.30 мм | D₃ = 0.48 мм | D₈ = 0.78 мм | D₁₆ = 1.26 мм\n\n"
+            "⚠️ <b>Опасная зона (Danger Zone) & Оценка дентина (RDT):</b>\n"
+            "• Внутренняя вогнутая стенка мезиальных корней нижних моляров имеет остаточную толщину дентина (RDT) часто менее 1.0–1.2 мм.\n"
+            "• Инструментация конусностью <b>.06</b> в искривленном канале на уровне D₈ расширяет канал до 0.73 мм, истончая стенку до критических <0.5 мм (риск strip-перфорации!).\n"
+            "• <b>Золотой стандарт для тонких искривленных каналов:</b> апикальное расширение <b>.04</b> (#25.04 или #30.04) с максимальным сохранением перицервикального дентина!"
+        )
+
+    # 3. Настройки эндомотора: Торк и Обороты (RPM & Torque)
+    is_torque_query = bool(
+        lower in ("torque", "торк", "обороты", "rpm", "эндомотор", "настройки эндомотора", "/calc torque") or
+        re.search(r'\b(?:торк\w*|torque|обороты\s+эндомотора|настройки\s+эндомотора|rpm|крутящий\s+момент)\b', lower) or
+        (re.search(r'\b(?:протейпер\w*|protaper|waveone|вейвуан|reciproc|реципрок|соко|soco)\b', lower) and re.search(r'\b(?:торк|обороты|настройки|rpm)\b', lower))
+    )
+    if is_torque_query:
+        return (
+            "⚙️ <b>Параметры эндомотора: Торк и Обороты (RPM & Torque)</b>\n\n"
+            "🔄 <b>1. Непрерывное вращение (Continuous Rotation):</b>\n"
+            "• <b>ProTaper Gold / Universal:</b>\n"
+            "  — SX (устьевик): <b>300 RPM</b> | Торк <b>5.0 Н·см</b>\n"
+            "  — S1 (формирующий): <b>300 RPM</b> | Торк <b>5.0 Н·см</b>\n"
+            "  — S2 (формирующий): <b>300 RPM</b> | Торк <b>1.5 Н·см</b>\n"
+            "  — F1 (20.07 финишер): <b>300 RPM</b> | Торк <b>1.5 Н·см</b>\n"
+            "  — F2 (25.08) / F3 (30.09): <b>300 RPM</b> | Торк <b>2.0–3.0 Н·см</b>\n"
+            "• <b>SOCO SC / SC Pro:</b> <b>350 RPM</b> | Торк <b>1.8–2.0 Н·см</b>\n"
+            "• <b>HyFlex CM / EDM:</b> <b>400–500 RPM</b> | Торк <b>2.5 Н·см</b>\n"
+            "• <b>2Shape (Micro-Mega):</b> <b>350–400 RPM</b> | Торк <b>1.5–2.0 Н·см</b>\n\n"
+            "🔁 <b>2. Реципрокные системы (Reciprocating):</b>\n"
+            "• <b>WaveOne Gold (Dentsply):</b>\n"
+            "  — Режим: <b>WAVEONE ALL</b> (CCW 170° / CW 50°, экв. ~350 RPM)\n"
+            "• <b>Reciproc Blue (VDW):</b>\n"
+            "  — Режим: <b>RECIPROC ALL</b> (CCW 150° / CW 30°)\n\n"
+            "⚡ <b>3. Ультразвуковые насадки (Endo-Ultrasonics):</b>\n"
+            "• <b>Start-X #1 / ProUltra #1 (доступ):</b> мощность 3–5 с водяным охлаждением.\n"
+            "• <b>Start-X #2 / #3 (поиск MB2 / устьев):</b> мощность 2–3, <b>сухой режим / воздух</b> под микроскопом.\n"
+            "• <b>Start-X #4 / #5 (извлечение файлолома):</b> мощность 1–2, импульсные касания по 2–3 сек против часовой стрелки."
+        )
+
+    return None
+
+
 def build_main_menu_markup():
     """Строит инлайн-клавиатуру главного меню — реальные кнопки врача."""
     from telethon import Button
@@ -8149,7 +8284,7 @@ async def handle_private_message(bot_client, event):
                 elif detected.name == INTENT_WEB_SEARCH:
                     text = f"/web {detected.query}".strip()
                 elif detected.name == INTENT_CALCULATOR:
-                    instant_calc = calculate_anesthesia_instant(text)
+                    instant_calc = calculate_anesthesia_instant(text) or calculate_endo_instant(text)
                     if instant_calc:
                         await bot_client.send_message(entity=chat_id, message=instant_calc, parse_mode='html')
                         return
@@ -8597,7 +8732,7 @@ async def handle_private_message(bot_client, event):
         if text.lower() == "/calc" or text.lower().startswith("/calc "):
             calc_arg = text[5:].strip() if text.lower().startswith("/calc ") else ""
             if calc_arg:
-                instant_calc = calculate_anesthesia_instant(calc_arg)
+                instant_calc = calculate_anesthesia_instant(calc_arg) or calculate_endo_instant(calc_arg)
                 if instant_calc:
                     await bot_client.send_message(entity=chat_id, message=instant_calc, parse_mode='html')
                     return
@@ -8610,7 +8745,7 @@ async def handle_private_message(bot_client, event):
             # Значения на килограмм оставлены как были: понижать предел
             # безопасно, повышать — нет, и без клинициста я этого не делаю.
             calc_text = (
-                "🧮 <b>Справочник-калькулятор анестезии</b>\n\n"
+                "🧮 <b>Справочник-калькулятор анестезии и эндодонтии EndoChat</b>\n\n"
                 "Пришлите препарат, концентрацию и вес — например "
                 "<i>«артикаин 4%, ребёнок 20 кг»</i> — и я посчитаю с арифметикой на виду.\n\n"
                 "<b>Предел всегда двойной: мг/кг И абсолютный максимум. Действует меньшее из двух.</b>\n\n"
@@ -8626,6 +8761,10 @@ async def handle_private_message(bot_client, event):
                 "  взрослые 7 мг/кг, дети 4.4 мг/кг, <b>но не более 500 мг</b>\n"
                 "  карпула 1.8 мл = 36 мг → потолок ≈ 13 карпул\n"
                 "  <i>потолок наступает при весе ≈ 71 кг</i>\n\n"
+                "🔬 <b>Эндодонтические модули у кресла:</b>\n"
+                "• <b>NaOCl & EDTA:</b> объём (≥ 15-20 мл/канал), подогрев 45-50°C, экспозиция EDTA 60 сек, PUI.\n"
+                "• <b>Конусность (Taper):</b> расчёт диаметра D0–D16 и Danger Zone дентина.\n"
+                "• <b>Торк & Обороты:</b> настройки эндомотора для NiTi систем (ProTaper, WaveOne, Reciproc).\n\n"
                 "⚠️ <i>Это референсные максимумы для здорового пациента, а не рекомендация дозы. "
                 "При сопутствующей патологии, у детей, беременных и пожилых предел ниже. "
                 "Объём карпулы и концентрацию сверяйте с инструкцией к своему препарату — "
@@ -8634,7 +8773,9 @@ async def handle_private_message(bot_client, event):
             from telethon import Button
             buttons = [
                 [Button.inline("🦷 Артикаин 4%", data="calc:articaine"), Button.inline("💉 Мепивакаин 3%", data="calc:mepivacaine")],
-                [Button.inline("🩸 Лидокаин 2%", data="calc:lidocaine"), Button.inline("⬅️ В главное меню", data="nav:main")]
+                [Button.inline("🩸 Лидокаин 2%", data="calc:lidocaine"), Button.inline("🧪 NaOCl & EDTA", data="calc:naocl")],
+                [Button.inline("📐 Конусность D0-D16", data="calc:taper"), Button.inline("⚙️ Торк & RPM", data="calc:torque")],
+                [Button.inline("⬅️ В главное меню", data="nav:main")]
             ]
             await bot_client.send_message(entity=chat_id, message=calc_text, buttons=buttons, parse_mode='html')
             return
@@ -11854,7 +11995,7 @@ async def handle_quiz_callback(bot_client, event):
             
         elif nav_target in ("calc", "anesthesia"):
             calc_msg = (
-                "🧮 <b>Справочник-калькулятор анестезии</b>\n\n"
+                "🧮 <b>Справочник-калькулятор анестезии и эндодонтии EndoChat</b>\n\n"
                 "Пришлите препарат, концентрацию и вес — например "
                 "<i>«артикаин 4%, ребёнок 20 кг»</i> — и я посчитаю с арифметикой на виду.\n\n"
                 "<b>Предел всегда двойной: мг/кг И абсолютный максимум. Действует меньшее из двух.</b>\n\n"
@@ -11870,12 +12011,17 @@ async def handle_quiz_callback(bot_client, event):
                 "  взрослые 7 мг/кг, дети 4.4 мг/кг, <b>но не более 500 мг</b>\n"
                 "  карпула 1.8 мл = 36 мг → потолок ≈ 13 карпул\n"
                 "  <i>потолок наступает при весе ≈ 71 кг</i>\n\n"
+                "🔬 <b>Эндодонтические модули у кресла:</b>\n"
+                "• <b>NaOCl & EDTA:</b> объём (≥ 15-20 мл/канал), подогрев 45-50°C, экспозиция EDTA 60 сек, PUI.\n"
+                "• <b>Конусность (Taper):</b> расчёт диаметра D0–D16 и Danger Zone дентина.\n"
+                "• <b>Торк & Обороты:</b> настройки эндомотора для NiTi систем (ProTaper, WaveOne, Reciproc).\n\n"
                 "⚠️ <i>Это референсные максимумы для здорового пациента, а не рекомендация дозы. "
                 "При сопутствующей патологии, у детей, беременных и пожилых предел ниже.</i>"
             )
             buttons = [
                 [Button.inline("🦷 Артикаин 4%", data="calc:articaine"), Button.inline("💉 Мепивакаин 3%", data="calc:mepivacaine")],
-                [Button.inline("🩸 Лидокаин 2%", data="calc:lidocaine")],
+                [Button.inline("🩸 Лидокаин 2%", data="calc:lidocaine"), Button.inline("🧪 NaOCl & EDTA", data="calc:naocl")],
+                [Button.inline("📐 Конусность D0-D16", data="calc:taper"), Button.inline("⚙️ Торк & RPM", data="calc:torque")],
                 [Button.inline("⬅️ Назад в меню", data="nav:main")]
             ]
             await edit_callback_message(bot_client, event, calc_msg,
@@ -12497,7 +12643,7 @@ async def handle_quiz_callback(bot_client, event):
         
         if calc_sub in ("main", "menu"):
             calc_msg = (
-                "🧮 <b>Справочник-калькулятор анестезии</b>\n\n"
+                "🧮 <b>Справочник-калькулятор анестезии и эндодонтии EndoChat</b>\n\n"
                 "Пришлите препарат, концентрацию и вес — например "
                 "<i>«артикаин 4%, ребёнок 20 кг»</i> — и я посчитаю с арифметикой на виду.\n\n"
                 "<b>Предел всегда двойной: мг/кг И абсолютный максимум. Действует меньшее из двух.</b>\n\n"
@@ -12513,12 +12659,17 @@ async def handle_quiz_callback(bot_client, event):
                 "  взрослые 7 мг/кг, дети 4.4 мг/кг, <b>но не более 500 мг</b>\n"
                 "  карпула 1.8 мл = 36 мг → потолок ≈ 13 карпул\n"
                 "  <i>потолок наступает при весе ≈ 71 кг</i>\n\n"
+                "🔬 <b>Эндодонтические модули у кресла:</b>\n"
+                "• <b>NaOCl & EDTA:</b> объём (≥ 15-20 мл/канал), подогрев 45-50°C, экспозиция EDTA 60 сек, PUI.\n"
+                "• <b>Конусность (Taper):</b> расчёт диаметра D0–D16 и Danger Zone дентина.\n"
+                "• <b>Торк & Обороты:</b> настройки эндомотора для NiTi систем (ProTaper, WaveOne, Reciproc).\n\n"
                 "⚠️ <i>Это референсные максимумы для здорового пациента, а не рекомендация дозы. "
                 "При сопутствующей патологии, у детей, беременных и пожилых предел ниже.</i>"
             )
             buttons = [
                 [Button.inline("🦷 Артикаин 4%", data="calc:articaine"), Button.inline("💉 Мепивакаин 3%", data="calc:mepivacaine")],
-                [Button.inline("🩸 Лидокаин 2%", data="calc:lidocaine")],
+                [Button.inline("🩸 Лидокаин 2%", data="calc:lidocaine"), Button.inline("🧪 NaOCl & EDTA", data="calc:naocl")],
+                [Button.inline("📐 Конусность D0-D16", data="calc:taper"), Button.inline("⚙️ Торк & RPM", data="calc:torque")],
                 [Button.inline("⬅️ Назад в меню", data="nav:main")]
             ]
             await edit_callback_message(bot_client, event, calc_msg,
@@ -12599,6 +12750,42 @@ async def handle_quiz_callback(bot_client, event):
             ]
             await edit_callback_message(bot_client, event, lido_text,
                                        "edit_message:calc_lidocaine", buttons=buttons,
+                                       parse_mode='html')
+            await event.answer()
+            return
+
+        elif calc_sub == "naocl":
+            naocl_text = calculate_endo_instant("naocl")
+            buttons = [
+                [Button.inline("📐 Конусность D0-D16", data="calc:taper"), Button.inline("⚙️ Торк & RPM", data="calc:torque")],
+                [Button.inline("🧮 К калькулятору", data="calc:main"), Button.inline("⬅️ Назад в меню", data="nav:main")]
+            ]
+            await edit_callback_message(bot_client, event, naocl_text,
+                                       "edit_message:calc_naocl", buttons=buttons,
+                                       parse_mode='html')
+            await event.answer()
+            return
+
+        elif calc_sub == "taper":
+            taper_text = calculate_endo_instant("taper")
+            buttons = [
+                [Button.inline("🧪 NaOCl & EDTA", data="calc:naocl"), Button.inline("⚙️ Торк & RPM", data="calc:torque")],
+                [Button.inline("🧮 К калькулятору", data="calc:main"), Button.inline("⬅️ Назад в меню", data="nav:main")]
+            ]
+            await edit_callback_message(bot_client, event, taper_text,
+                                       "edit_message:calc_taper", buttons=buttons,
+                                       parse_mode='html')
+            await event.answer()
+            return
+
+        elif calc_sub == "torque":
+            torque_text = calculate_endo_instant("torque")
+            buttons = [
+                [Button.inline("🧪 NaOCl & EDTA", data="calc:naocl"), Button.inline("📐 Конусность D0-D16", data="calc:taper")],
+                [Button.inline("🧮 К калькулятору", data="calc:main"), Button.inline("⬅️ Назад в меню", data="nav:main")]
+            ]
+            await edit_callback_message(bot_client, event, torque_text,
+                                       "edit_message:calc_torque", buttons=buttons,
                                        parse_mode='html')
             await event.answer()
             return

@@ -635,7 +635,7 @@ class TestClinicalSuperpowers(unittest.TestCase):
                 'sos': set(assistant.CLINICAL_SOS_CARDS.keys()) | {'ai', 'random'},
                 'trans': set(assistant.PATIENT_TRANSLATION_CARDS.keys()) | {'ai', 'random'},
                 'vs': set(assistant.MATERIAL_BATTLE_CARDS.keys()) | {'ai', 'random'},
-                'calc': {'articaine', 'mepivacaine', 'lidocaine'},
+                'calc': {'articaine', 'mepivacaine', 'lidocaine', 'naocl', 'taper', 'torque'},
                 'nav': {'main', 'sos', 'record', 'rx', 'concilium', 'translate', 'vs', 'wiki'}
             }
             total_card_count = 0
