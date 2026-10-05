@@ -2125,6 +2125,8 @@ async def process_media_message(messages, msg_id, text, media_type_hint=None):
                         if cdn_url:
                             await database.update_media_remote_url(analyzed_id, cdn_url)
                             logger.info("media_cdn_saved msg_id=%s url=%s", analyzed_id, cdn_url)
+                        else:
+                            logger.warning("media_cdn_failed msg_id=%s: upload returned None for %s", analyzed_id, fpath)
                     except Exception as cdn_err:
                         logger.warning("media_cdn_failed msg_id=%s: %s", analyzed_id, cdn_err)
                 

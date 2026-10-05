@@ -2,7 +2,7 @@ import asyncio
 import os
 import sys
 
-sys.path.insert(0, r"c:\Users\danat\Desktop\stomchat")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from digest_pdf import generate_digest_pdf, render_pdf_first_page_preview
 
 async def test_pdf_generation():
@@ -14,7 +14,7 @@ async def test_pdf_generation():
     <p>В чате развернулась профессиональная дискуссия касательно препарирования без уступа (Vertiprep / BOPT) в области жевательной группы зубов. Доктор Иванов представил анатомические обоснования сохранения коронкового феррула при дефиците твердых тканей.</p>
     
     <p><b>2. 🦷 КЛИНИЧЕСКИЕ КЕЙСЫ</b></p>
-    <p><b>▶️ СИТУАЦИЯ:</b> Пациент 38 лет обратился с жалобами на боли при накусывании в области зуба 4.6. На прицельном рентгеновском снимке визуализируется периапикальный очаг деструкции у дистального корня, ранее лечен резорцин-формалиновым методом.</p>
+    <p><b>▶️ СИТУАЦИЯ:</b> Пациент 38 лет обрадился с жалобами на боли при накусывании в области зуба 4.6. На прицельном рентгеновском снимке визуализируется периапикальный очаг деструкции у дистального корня, ранее лечен резорцин-формалиновым методом.</p>
     
     <figure>
         <img src="https://iili.io/no8eVkb.jpg" alt="Clinical Case">
@@ -35,7 +35,7 @@ async def test_pdf_generation():
     print("Generating Clinical Digest PDF...")
     pdf_path = await generate_digest_pdf(
         html_content=test_html,
-        title="Клинический Вестник StomChat",
+        title="Клинический Вестник EndoChat",
         subtitle="Еженедельный клинический дайджест профессионального сообщества",
         msg_count=420,
         date_str="17.09.2026",
