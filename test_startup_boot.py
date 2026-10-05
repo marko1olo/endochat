@@ -33,8 +33,9 @@ os.environ["STOMCHAT_LOG_PATH"] = os.path.join(_TMPDIR, "boot.log")
 import config  # noqa: E402
 
 for _ext in ("", "-wal", "-shm"):
-    if os.path.exists("stomat_bot.db" + _ext):
-        shutil.copy2("stomat_bot.db" + _ext, os.path.join(_TMPDIR, "boot.db" + _ext))
+    for _db in ("stomat_bot.db", getattr(config, "DB_PATH", "endo_bot.db")):
+        if os.path.exists(_db + _ext):
+            shutil.copy2(_db + _ext, os.path.join(_TMPDIR, "boot.db" + _ext))
 config.DB_PATH = os.path.join(_TMPDIR, "boot.db")
 
 import runtime_guard  # noqa: E402
@@ -249,6 +250,7 @@ async def run_sync_checks():
     import sqlite3
     db_conn = sqlite3.connect(config.DB_PATH)
     db_conn.execute("DELETE FROM messages WHERE msg_id >= 500000;")
+    db_conn.execute("INSERT OR IGNORE INTO messages (msg_id, sender_id, text, date) VALUES (100, 1, 'baseline', '2026-01-01 00:00:00');")
     db_conn.commit()
     db_conn.close()
 
@@ -336,6 +338,13 @@ async def run_media_checks():
     async def iter_messages(*args, **kwargs):
         for message in messages:
             yield message
+
+    import sqlite3
+    db_conn = sqlite3.connect(config.DB_PATH)
+    db_conn.execute("DELETE FROM messages WHERE msg_id >= 700000;")
+    db_conn.execute("INSERT OR IGNORE INTO messages (msg_id, sender_id, text, date) VALUES (100, 1, 'baseline', '2026-01-01 00:00:00');")
+    db_conn.commit()
+    db_conn.close()
 
     real_client = main.client
     real_start = main.start_media_analysis_workers

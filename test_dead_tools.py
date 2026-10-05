@@ -163,6 +163,12 @@ STANDALONE = {
     "apply_content_hash_migration": "разовая миграция таблицы distilled_facts на UNIQUE(content_hash)",
     "dump_recent_bot_disasters": "диагностический дампер последних аварийных сообщений бота",
     "fix_corrupted_source_ids": "разовая вычистка MSG_ префиксов из source_ids в stomat_wiki.db",
+    "backfill_facts": "скрипт ретроспективного наполнения долговременной клинической памяти врачей",
+    "dump_secret_videos": "скрипт выгрузки закрытых видеоматериалов архива сообщества",
+    "migrate_all_secret_videos": "пакетная миграция закрытых видеоматериалов в локальное хранилище",
+    "migrate_pipeline": "миграция схемы и конвейера обработки данных",
+    "mirror_backfill": "наполнение и синхронизация зеркала базы знаний сообщества",
+    "setup_target_topics": "разовая инициализация и привязка топиков форума Telegram",
 }
 
 

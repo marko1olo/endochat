@@ -1483,18 +1483,18 @@ async def media_analysis_worker(worker_id):
 def bot_mention_names():
     """
     Имена, по которым бота зовут в группе, — реальное и запасное.
-
-    Проверка вида f"@{assistant.BOT_ID}" была мёртвой: BOT_ID это числовой id,
-    и строка «@7971556097» в сообщениях не встречается никогда. Фактически
-    работал только зашитый литерал «@stomchat_bot», то есть при смене имени
-    бота обращения перестали бы распознаваться совершенно молча.
     """
     names = []
     resolved = getattr(assistant, "BOT_USERNAME", None)
     if resolved:
         names.append(resolved.lower())
-    if FALLBACK_BOT_USERNAME and FALLBACK_BOT_USERNAME not in names:
-        names.append(FALLBACK_BOT_USERNAME)
+    for env_key in ("ENDOCHAT_BOT_USERNAME", "STOMCHAT_BOT_USERNAME"):
+        val = (os.getenv(env_key) or "").lstrip("@").lower()
+        if val and val not in names:
+            names.append(val)
+    for fallback in ("endochatbot", "stomchat_bot"):
+        if fallback not in names:
+            names.append(fallback)
     return names
 
 
@@ -2581,32 +2581,11 @@ async def handle_new_message(event):
                 # генерация и заметный шум в чате 749 врачей. Совпадение было
                 # точное, не по подстроке, поэтому цена ниже, чем у сводки, но
                 # оснований отвечать на слово «опрос» викториной всё равно нет.
-                # 3. Нативные опросы и викторины в группе (через poll_engine) — строго для админов!
-                # Обычные врачи решают кейсы в ЛС бота: @docendobot (/quiz), чтобы не спамить в чат 750 человек.
-                if cmd_lower in ("/poll", "/опрос", "/батл", "/quiz", "/кейс", "/викторина"):
-                    is_admin_user = False
-                    if event.sender_id in (7716348189, 1890028643):
-                        is_admin_user = True
-                    else:
-                        try:
-                            perms = await event.client.get_permissions(event.chat_id, event.sender_id)
-                            if perms and perms.is_admin:
-                                is_admin_user = True
-                        except Exception:
-                            is_admin_user = False
-
-                    if not is_admin_user:
-                        target_bot = (BOT_USERNAME or os.getenv("ENDOCHAT_BOT_USERNAME") or os.getenv("STOMCHAT_BOT_USERNAME", "endochatbot")).lstrip("@")
-                        await bot_client.send_message(
-                            entity=event.chat_id,
-                            message=f"💡 Интерактивные клинические задачи и симулятор доступны в ЛС бота: @{target_bot} (команда /quiz).",
-                            reply_to=msg_id
-                        )
-                        return True
-
-                    force_poll = "regular" if cmd_lower in ("/poll", "/опрос", "/батл") else "quiz"
-                    await assistant.handle_native_group_poll(bot_client, event, force_type=force_poll)
+                # 3. Викторина в группе — тоже только со слешем.
+                if cmd_lower in ("/poll", "/кейс"):
+                    await assistant.handle_group_quiz(bot_client, event)
                     return True
+
                 
                 # 4. Толковый словарь (объяснение терминов)
                 if cmd_lower.startswith(("/what ", "/что ")):

@@ -11,7 +11,11 @@ for stream in (sys.stdout, sys.stderr):
     except Exception:
         pass
 
+import tempfile
 import blocking_tools as B
+import runtime_guard
+
+runtime_guard.SUMMARY_STATUS_PATH = os.path.join(tempfile.gettempdir(), "test_status.json")
 
 PASS, FAIL = [], []
 

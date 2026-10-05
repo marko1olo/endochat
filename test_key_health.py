@@ -150,6 +150,8 @@ gc.time.sleep = lambda seconds: SLEEPS.append(seconds)
 # Файл голосового не конвертируем: ffmpeg на этой машине битый, а путь конвертации
 # проверяется в test_voice_pipeline. Здесь важен только отбор ключей.
 gc.convert_to_wav = lambda path: path
+gc.is_audio_silent_or_empty = lambda path: False
+
 
 _AUDIO_PATH = os.path.join(_TMPDIR, "voice.ogg")
 with open(_AUDIO_PATH, "wb") as _handle:

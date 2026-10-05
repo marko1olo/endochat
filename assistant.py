@@ -2267,35 +2267,10 @@ async def search_knowledge_corpus(keywords, query_text=""):
                 except Exception as e:
                     logger.error(f"Error searching stomat_archive.db: {e}")
 
-            # Адаптивный размер RAG:
-            # Если в запросе мало ключевых слов (keyword_count <= 2) или вопрос короткий (< 40 символов),
-            # ограничиваем суммарный RAG-контекст 2500–3000 символами (8-10 строк) вместо 24 000!
-            # Для больших развернутых кейсов оставляем полный бюджет (_CORPUS_MAX_CHARS = 12000 на каждый корпус).
-            kw_count = len(keywords)
-            q_len = len(query_text.strip()) if query_text else 0
-            is_compact = (kw_count <= 2) or (0 < q_len < 40)
-
-            if is_compact:
-                if wiki_facts and archive_msgs:
-                    wiki_limit = 1500
-                    archive_limit = 1500
-                    wiki_rows = 5
-                    archive_rows = 5
-                elif wiki_facts:
-                    wiki_limit = 2800
-                    archive_limit = 0
-                    wiki_rows = 9
-                    archive_rows = 0
-                else:
-                    wiki_limit = 0
-                    archive_limit = 2800
-                    wiki_rows = 0
-                    archive_rows = 9
-            else:
-                wiki_limit = _CORPUS_MAX_CHARS
-                archive_limit = _CORPUS_MAX_CHARS
-                wiki_rows = _CORPUS_OUTPUT_LIMIT
-                archive_rows = _CORPUS_OUTPUT_LIMIT
+            wiki_limit = _CORPUS_MAX_CHARS
+            archive_limit = _CORPUS_MAX_CHARS
+            wiki_rows = _CORPUS_OUTPUT_LIMIT
+            archive_rows = _CORPUS_OUTPUT_LIMIT
 
             wiki_corpus = "\n".join(_rank_corpus_entries(wiki_facts, keywords, max_chars=wiki_limit, output_limit=wiki_rows)) if wiki_facts else ""
             archive_corpus = "\n".join(_rank_corpus_entries(archive_msgs, keywords, max_chars=archive_limit, output_limit=archive_rows)) if archive_msgs else ""
@@ -4570,7 +4545,7 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
     # BUILD PROMPT
     has_text_desc = bool(media_description and str(media_description).strip())
     multimodal_notice = ""
-    if image_urls and not has_text_desc:
+    if image_urls:
         multimodal_notice = """
 [МУЛЬТИМОДАЛЬНОЕ ЗРЕНИЕ: К твоему запросу прикреплено оригинальное изображение в высоком разрешении. Внимательно сопоставь описание модели зрения с реальным снимком, деталями рентгенограммы, анатомией зубов и клинической картиной. Опирайся в первую очередь на то, что ты реально видишь на прикрепленном снимке.]
 """
@@ -4684,7 +4659,7 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
     
     # CALL GEMINI
     status_ctx = {"kind": "assistant_media", "chat_id": event.chat_id, "thinking_level": "HIGH"}
-    if image_urls and not has_text_desc:
+    if image_urls:
         status_ctx["image_urls"] = image_urls
     response, error = await generate_gemini_text_async(prompt, status_ctx, timeout=120)
     
@@ -4934,6 +4909,30 @@ CLINICAL_QUIZ_FALLBACKS = [
         ],
         "correct": 2,
         "explanation": "По протоколу IADT зуб бережно промывают физраствором без касания корня, реплантируют, фиксируют гибкой шиной до 2 недель, а эндодонтическое лечение закрытого апекса начинают через 7-10 дней."
+    },
+    {
+        "topic": "Эндодонтия (Осложнения)",
+        "question": "Во время ирригации дистального канала зуба 4.6 3% раствором NaOCl пациент ощутил внезапную острую жгучую боль, возник стремительный отек щеки и гематома (гипохлоритовая авария). Каков экстренный протокол действий у кресла?",
+        "options": [
+            "Немедленно ввести в канал 17% ЭДТА, загерметизировать временной пломбой и отпустить домой",
+            "Прекратить подачу NaOCl, аспирация, промыть канал физраствором/анестетиком, ввести дексаметазон, назначить холод на 24 ч, анальгетики и антибиотикопрофилактику",
+            "Наложить согревающий компресс на щеку и ввести внутримышечно хлорид кальция",
+            "Выполнить немедленную резекцию верхушки дистального корня для дренирования раствора"
+        ],
+        "correct": 1,
+        "explanation": "Протокол купирования выведения NaOCl (гипохлоритовой аварии): немедленная аспирация и промывание стерильным физраствором/местным анестетиком, системные НПВС/ГКС (дексаметазон 4-8 мг), холод местно в первые 24 часа (тепло строго противопоказано!), системная антибиотикопрофилактика (амоксициллин/клавуланат) и динамический контроль."
+    },
+    {
+        "topic": "Эндодонтия (Инструментация)",
+        "question": "При механической обработке мезиально-щечного канала (МВ1) зуба 2.6 с кривизной по Шнайдеру 35° произошла сепарация NiTi-инструмента 25.04 в апикальной трети (длина отломка 2.5 мм, верхушка за апикальным изгибом). Симптомов периодонтита нет. Какова наиболее безопасная тактика?",
+        "options": [
+            "Агрессивная ультразвуковая обработка на максимальной мощности вслепую до полного выбивания отломка",
+            "Создание ковровой дорожки ручным K-file #08/#10 с байпасом (обходом) отломка по внутренней кривизне, ирригация и обтурация в пределах созданного просвета",
+            "Немедленное удаление зуба из-за невозможности извлечения инструмента",
+            "Попытка захвата отломка микропинцетом или экстрактором без предварительного прямолинейного доступа"
+        ],
+        "correct": 1,
+        "explanation": "При сепарации инструмента в апикальной трети за выраженным изгибом канала попытка извлечения ультразвуком сопряжена с критическим истончением дентина и риском strip-перфорации. Тактикой выбора является осторожный байпас (bypass) ручными файлами малых размеров (#08-#10) с последующей химико-механической обработкой и обтурацией."
     }
 ]
 

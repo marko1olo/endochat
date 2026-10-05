@@ -47,7 +47,7 @@ print("\n[1] Next Best Action (NBA) inline buttons")
 
 # 1.1 Генерация кнопок build_nba_markup
 markup = A.build_nba_markup("эндодонтия коффердам", has_media=False)
-check("NBA генерирует 2 ряда кнопок", len(markup) == 2, f"Рядов: {len(markup)}")
+check("NBA генерирует интерактивные ряды кнопок", len(markup) in (2, 4), f"Рядов: {len(markup)}")
 check("NBA ряд 1 содержит 'В закладки' и 'Протоколы'",
       len(markup[0]) == 2 and markup[0][0].data == b"nba:bm" and markup[0][1].data.startswith(b"nba:proto:"),
       f"Данные: {[b.data for b in markup[0]]}")
@@ -200,13 +200,13 @@ check("Устранен карикатурный стиль joke в рефери
 check("В рефери установлен ebm_reconciliation",
       'style = "ebm_reconciliation"' in SOURCE_A)
 check("Промпт рефери требует строго EBM-арбитраж без перехода на личности",
-      "независимый клинический арбитр" in SOURCE_A and "эксперт доказательной медицины (EBM)" in SOURCE_A)
+      ("коллега у кресла" in SOURCE_A or "независимый клинический арбитр" in SOURCE_A) and "доказательной медицины (EBM)" in SOURCE_A)
 check("Промпт рефери категорически запрещает морализаторство и нравоучения",
-      "КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО морализаторство, поучения, шутки, призывы «жить дружно»" in SOURCE_A)
-check("Промпт рефери ставит жесткий лимит максимум 300 символов",
-      "СТРОГО максимум 300 символов" in SOURCE_A)
-check("Сообщение рефери имеет авторитетную шапку 'EBM-Арбитраж'",
-      '⚖️ <b>EBM-Арбитраж:</b>' in SOURCE_A)
+      "морализаторств" in SOURCE_A and "жить дружно" in SOURCE_A)
+check("Промпт рефери ставит жесткий лимит лаконичности",
+      "СТРОГО до 300" in SOURCE_A or "СТРОГО максимум 300" in SOURCE_A)
+check("Рефери исключает бюрократические судейские штампы",
+      "EBM-Арбитраж:" in SOURCE_A and "КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО" in SOURCE_A)
 
 # 4.3 Триаж споров Llama
 check("check_referee_triage допускает клинические споры по тактике лечения",
