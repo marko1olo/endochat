@@ -552,7 +552,7 @@ class TestClinicalSuperpowers(unittest.TestCase):
                     check(f"{action} вызвал answer", cb.answered_count >= 1)
                     check(f"{action} обновил сообщение", cb.edited_count >= 1 or len(bot.edited_messages) >= 1)
                     msg = cb.last_edit_text or (bot.edited_messages[-1]["message"] if bot.edited_messages else "")
-                    check(f"{action} содержит маркер живой ИИ-генерации", "Живой ИИ-разбор StomChat Superpowers" in msg)
+                    check(f"{action} содержит маркер живой ИИ-генерации", ("Живой ИИ-разбор EndoChat Superpowers" in msg or "Живой ИИ-разбор StomChat Superpowers" in msg))
                     last_btns = (bot.edited_messages[-1].get("buttons") if bot.edited_messages else None) or cb.last_edit_buttons
                     btn_datas = [b.data.decode("utf-8") if isinstance(b.data, bytes) else str(b.data)
                                  for row in (last_btns or []) for b in row if hasattr(b, "data")]
@@ -571,7 +571,7 @@ class TestClinicalSuperpowers(unittest.TestCase):
                     await assistant.handle_quiz_callback(bot, cb)
                     check(f"{action} (fallback) вызвал answer", cb.answered_count >= 1)
                     msg = cb.last_edit_text or (bot.edited_messages[-1]["message"] if bot.edited_messages else "")
-                    check(f"{action} (fallback) выдал проверенный кэш с пометкой архива", "Клинический архив StomChat" in msg)
+                    check(f"{action} (fallback) выдал проверенный кэш с пометкой архива", ("Клинический архив EndoChat" in msg or "Клинический архив StomChat" in msg))
             finally:
                 assistant.generate_gemini_text_async = original_gemini
 

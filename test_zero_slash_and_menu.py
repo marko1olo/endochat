@@ -281,7 +281,7 @@ async def run_all_tests():
     check("nav:main вызвал event.answer()", cb_main.answered_count >= 1)
     check("nav:main обновил сообщение (event.edit / edit_message)", len(EDITED) >= 1 or cb_main.edited_count >= 1)
     last_msg = EDITED[-1]["message"] if EDITED else (cb_main.last_edit_text or "")
-    check("nav:main содержит приветствие меню", any(w in last_msg for w in ("StomChat", "Клинический навигатор", "База Знаний", "Добро пожаловать")))
+    check("nav:main содержит приветствие меню", any(w in last_msg for w in ("EndoChat", "StomChat", "Клинический навигатор", "База Знаний", "Добро пожаловать")))
 
     # 2. nav:help
     reset()
@@ -354,7 +354,7 @@ async def run_all_tests():
     await assistant.handle_private_message(bot, msg_menu)
     check("Запрос «открой главное меню» вернул меню", len(SENT) >= 1)
     menu_messages = [s["message"] for s in SENT]
-    has_menu_text = any("StomChat" in m or "Клинический навигатор" in m or "База Знаний" in m or "меню" in m.lower() for m in menu_messages)
+    has_menu_text = any("EndoChat" in m or "StomChat" in m or "Клинический навигатор" in m or "База Знаний" in m or "меню" in m.lower() for m in menu_messages)
     has_buttons = any(s.get("buttons") is not None for s in SENT)
     check("Главное меню содержит приветствие", has_menu_text)
     check("Главное меню отправлено с кнопками", has_buttons)
@@ -418,7 +418,7 @@ async def run_all_tests():
     await assistant.handle_private_message(bot, msg_tap_menu)
     check("Тап «⌨️ Меню» прислал РОВНО ОДНО сообщение (нет спам-дублей)", len(SENT) == 1)
     menu_res = SENT[-1]["message"] if SENT else ""
-    check("Ответ содержит главное меню StomChat", "StomChat" in menu_res)
+    check("Ответ содержит главное меню EndoChat", "EndoChat" in menu_res or "StomChat" in menu_res)
     menu_btns = SENT[-1].get("buttons") or []
     flat_menu = [b for row in menu_btns for b in row]
     menu_datas = [b.data.decode("utf-8") if isinstance(b.data, bytes) else str(b.data) for b in flat_menu if hasattr(b, "data")]

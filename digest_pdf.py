@@ -1,5 +1,5 @@
 """
-digest_pdf.py — Генератор полиграфического PDF-вестника StomChat.
+digest_pdf.py — Генератор полиграфического PDF-вестника EndoChat.
 
 Преобразует аналитический лонгрид (HTML/Markdown) в сверстанный медицинский журнал
 формата A4 на базе Playwright Chromium Headless:
@@ -46,7 +46,7 @@ def _build_journal_html(
     """Оборачивает фрагменты разбора в полноценный HTML-документ журнальной верстки."""
     now_date = date_str or datetime.now().strftime("%d.%m.%Y")
     clean_title = html.escape(title)
-    clean_subtitle = html.escape(subtitle or "Клинический дайджест сообщества «Учимся вместе» (@docendobot)")
+    clean_subtitle = html.escape(subtitle or "Клинический дайджест сообщества «EndoChat» (@endochatbot)")
     logo_b64 = _get_logo_base64()
 
     # 1. Если во входящем HTML уже присутствует текстовый CTA ассистента (из Telegraph),
@@ -256,7 +256,7 @@ def _build_journal_html(
             size: A4 portrait;
             margin: 16mm 14mm 18mm 14mm;
             @bottom-left {{
-                content: "Docendo Discimus • Клинический вестник «Учимся вместе»";
+                content: "EndoChat • Клинический вестник эндодонтии";
                 font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
                 font-size: 8pt;
                 color: #64748b;
@@ -683,7 +683,7 @@ def _build_journal_html(
         <div class="journal-header-left">
             {f'<img class="journal-emblem" src="data:image/png;base64,{logo_b64}" alt="Docendo Discimus">' if logo_b64 else ''}
             <div class="journal-brand">
-                <div class="journal-logo">DOCENDO <span>DISCIMUS</span> • КЛИНИЧЕСКИЙ ВЕСТНИК</div>
+                <div class="journal-logo">ENDOCHAT • КЛИНИЧЕСКИЙ ВЕСТНИК ЭНДОДОНТИИ</div>
                 <div class="journal-subtitle">{clean_subtitle}</div>
             </div>
         </div>
@@ -694,9 +694,9 @@ def _build_journal_html(
     </div>
 
     <div class="issue-summary-bar">
-        <div class="issue-summary-item">🔬 Стандарт: <strong>Evidence-Based Dentistry</strong></div>
-        <div class="issue-summary-item">🦷 Сообщество: <strong>«Учимся вместе» (Docendo Discimus)</strong></div>
-        <div class="issue-summary-item">📍 Источник: <strong>Практикующие врачи сообщества</strong></div>
+        <div class="issue-summary-item">🔬 Стандарт: <strong>Evidence-Based Endodontics (AAE / ESE)</strong></div>
+        <div class="issue-summary-item">🦷 Сообщество: <strong>EndoChat (Эндодонтия под микроскопом)</strong></div>
+        <div class="issue-summary-item">📍 Источник: <strong>Практикующие врачи-эндодонтисты</strong></div>
     </div>
 
     <div class="journal-content">
@@ -705,36 +705,36 @@ def _build_journal_html(
 
     <div class="journal-closing-block">
         <div class="assistant-promo-card">
-            <div class="assistant-promo-title">🤖 КЛИНИЧЕСКИЙ АССИСТЕНТ @DOCENDOBOT • ПОМОЩНИК НА ПРИЕМЕ</div>
+            <div class="assistant-promo-title">🤖 КЛИНИЧЕСКИЙ АССИСТЕНТ @ENDOCHATBOT • ПОМОЩНИК У МИКРОСКОПА</div>
             <div class="assistant-promo-desc">
-                Коллеги, бот сообщества — это ваш персональный клинический ассистент прямо в Telegram. Напишите ему в личные сообщения для мгновенного разбора кейса:
+                Коллеги, бот сообщества — это ваш персональный клинический эндодонтический ассистент прямо в Telegram. Напишите ему в личные сообщения для мгновенного разбора кейса:
             </div>
             <div class="assistant-promo-grid">
                 <div class="assistant-promo-item">
-                    <b>🔬 Мульти-анализ снимков и фото (Vision)</b>
-                    Присылайте в ЛС прицельные снимки, КЛКТ, ОПТГ и фотопротоколы (включая серии/альбомы). Бот оценивает краевое прилегание, периапикальные очаги, анатомию каналов и дефекты реставраций.
+                    <b>🔬 Мульти-анализ снимков и КЛКТ (Vision)</b>
+                    Присылайте в ЛС прицельные радиовизиограммы, срезы КЛКТ и фото эндодоступа. Бот оценивает анатомию каналов (MB2, C-shape), кривизну корней, апикальный периодонтит (PAI), качество обтурации и признаки трещин (VRF).
                 </div>
                 <div class="assistant-promo-item">
-                    <b>💊 Фармакология и анестезия</b>
-                    Точный расчет дозировок и карпул анестетиков по массе тела с учетом соматики (ASA, кардиоваскулярные патологии, беременность, дети), подбор антибиотикотерапии и премедикации.
+                    <b>💊 Эндодонтическая фармакология и анестезия</b>
+                    Точный расчет анестезии при горячем пульпите по весу и соматике (ASA), подбор схем купирования симптоматического апикального периодонтита (flare-up) и строгие показания к антибиотикам.
                 </div>
                 <div class="assistant-promo-item">
                     <b>📚 Клинические протоколы (/protocols)</b>
-                    Пошаговые алгоритмы доказательной стоматологии: BOPT, препарирование, протокол ирригации NaOCl/ЭДТА, закрытие перфораций МТА/Биодентин, адгезивная фиксация E.max.
+                    Пошаговые алгоритмы доказательной эндодонтии: протокол ультразвуковой активации PUI/EDDY, байпас отломка файла, закрытие перфораций МТА/Biodentine, гидравлическая биокерамика, билдап с сохранением феррула.
                 </div>
                 <div class="assistant-promo-item">
                     <b>👤 Клиническая память врача (/profile)</b>
-                    Бот помнит вашу специализацию, клинический почерк, стаж и арсенал оборудования, адаптируя все рекомендации под ваш стиль работы.
+                    Бот помнит вашу файловую систему, оптику (микроскоп/бинокуляры), используемые силеры и стаж, адаптируя рекомендации под ваш инструментарий.
                 </div>
             </div>
             <div class="assistant-promo-cta">
-                👉 <strong>Напишите боту в личные сообщения: @docendobot</strong> — разберите клинический кейс или снимок прямо сейчас.
+                👉 <strong>Напишите боту в личные сообщения: @endochatbot</strong> — разберите клинический эндодонтический кейс или снимок прямо сейчас.
             </div>
         </div>
 
         <div class="journal-footer">
-            Материалы подготовлены на основе клинических обсуждений врачебного сообщества «Учимся вместе» (Docendo Discimus).
-            Предназначено исключительно для врачей-стоматологов в образовательных и профессиональных целях. Бот: @docendobot
+            Материалы подготовлены на основе клинических обсуждений врачебного сообщества EndoChat.
+            Предназначено для врачей-стоматологов и эндодонтов в образовательных и клинических целях. Бот: @endochatbot
         </div>
     </div>
 </body>
@@ -764,7 +764,7 @@ async def generate_digest_pdf(
     os.makedirs(output_dir, exist_ok=True)
     timestamp = int(time.time())
     safe_date = re.sub(r'[^0-9a-zA-Z_\-]+', '_', date_str) if date_str else str(timestamp)
-    filename = f"StomChat_Digest_{safe_date}_{timestamp}.pdf"
+    filename = f"EndoChat_Digest_{safe_date}_{timestamp}.pdf"
     output_path = os.path.join(output_dir, filename)
 
     full_html = _build_journal_html(

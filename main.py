@@ -2596,9 +2596,10 @@ async def handle_new_message(event):
                             is_admin_user = False
 
                     if not is_admin_user:
+                        target_bot = (BOT_USERNAME or os.getenv("ENDOCHAT_BOT_USERNAME") or os.getenv("STOMCHAT_BOT_USERNAME", "endochatbot")).lstrip("@")
                         await bot_client.send_message(
                             entity=event.chat_id,
-                            message="💡 Интерактивные клинические задачи и симулятор доступны в ЛС бота: @docendobot (команда /quiz).",
+                            message=f"💡 Интерактивные клинические задачи и симулятор доступны в ЛС бота: @{target_bot} (команда /quiz).",
                             reply_to=msg_id
                         )
                         return True
@@ -3509,12 +3510,12 @@ def acquire_single_instance_lock():
         try:
             import ctypes
             kernel32 = ctypes.windll.kernel32
-            mutex_name = "Global\\StomChat_Bot_Instance_Mutex"
+            mutex_name = "Global\\EndoChat_Bot_Instance_Mutex"
             ERROR_ALREADY_EXISTS = 183
             mutex = kernel32.CreateMutexW(None, False, mutex_name)
             last_err = kernel32.GetLastError()
             if last_err == ERROR_ALREADY_EXISTS:
-                logger.warning("Another instance of StomChat bot is already running (Windows Named Mutex exists). Exiting cleanly without crashing SQLite.")
+                logger.warning("Another instance of EndoChat bot is already running (Windows Named Mutex exists). Exiting cleanly without crashing SQLite.")
                 sys.exit(0)
             return mutex
         except Exception as e:
