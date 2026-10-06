@@ -514,18 +514,19 @@ async def check_dialogue_continuation_triage(dialogue_chain, recent_chat=None):
    - Если врач просит клиническое обоснование, аргументацию или ставит под сомнение тактику ("Почему так решили?", "На каком основании?", "А как быть с...", "Почему именно этот материал/бор?", "Разве не лучше X?", "А если корень искривлен?").
    - Вопросы-сомнения и профессиональная дискуссия — это нормальная медицинская практика консилиума, а НЕ спор или троллинг.
    - ОСПАРИВАНИЕ ОШИБОК И ГАЛЛЮЦИНАЦИЙ БОТА (СТРОГО YES): Если врач оспаривает клинический вердикт, диагноз или находку бота на снимке, указывает на ошибку или ставит под сомнение увиденный дефект, даже в резкой, эмоциональной или саркастичной разговорной форме ("Ты где там это увидел?", "Какой нависающий край?", "Ты че алкаш?", "С дуба рухнул?", "Покажи где кариес", "Че за бред?"). Это КЛИНИЧЕСКАЯ АПЕЛЛЯЦИЯ. Бот ОБЯЗАН ответить: перепроверить снимок/контекст, признать ошибку если ошибся, или аргументированно пояснить свою мысль. Молчать при указании на ошибку категорически запрещено!
+   - ПРОФЕССИОНАЛЬНЫЙ СКЕПСИС, ИРОНИЯ И ВЫЗОВЫ СТАТУСУ БОТА ("ТЫ РОБОТ", "КАКОЙ ТЫ КОЛЛЕГА", "СМОЖЕТ ЛИ ИИ ПРОЙТИ ОБЛИТЕРАЦИЮ / ПАФ / СТУПЕНЬ") (СТРОГО YES): Если врач иронизирует над ботом, подкалывает, что робот не умеет работать руками ("какой ты нам коллега, ты бездушная машина", "робот сможет обойти ступень / получить красивый паф / пройти облитерацию?", "у тебя же нет рук/глаз"), это НЕ троллинг и НЕ отказ от общения! Это живой профессиональный челлендж и подкол в сообществе. Бот ОБЯЗАН ответить с достоинством, эндодонтическим юмором и уважением к мануальным навыкам клинициста. На любые подобные выпады ВСЕГДА отвечай YES!
    - ВОПРОСЫ О ВОЗМОЖНОСТЯХ И ФУНКЦИЯХ БОТА (СТРОГО YES): Если врач спрашивает, как пользоваться ботом, какие есть протоколы/команды, как получить дайджест, посчитать анестезию или найти ассистента в ЛС — отвечай YES.
    На любые такие вопросы ВСЕГДА отвечай YES.
 
 2. КОГДА ОТВЕЧАТЬ NO (МОЛЧАТЬ):
    - Врач прямо требует замолчать или выражает резкое раздражение ботом ("заткнись", "хватит спамить", "бот отвали", "не лезь", "хватит").
    - Завершение диалога или короткие фразы вежливости/согласия ("Спасибо", "Спасибо, понял", "Ясно", "Ок", "Принял", "Договорились", "Благодарю"). Диалог успешно завершён, отвечать дежурными репликами НЕ НУЖНО.
-   - Бессодержательный троллинг или мат БЕЗ какого-либо клинического контекста, вопроса или оспаривания факта ("бот дурак", "чушь собачья" без указания, что именно не так). Но если наряду с эмоциональным словом есть вопрос по существу ("какой нависающий край?", "где ты увидел трещину?") — это клинический спор, отвечай YES!
+   - Бессодержательный мат или тупая ругань БЕЗ какого-либо клинического контекста, вопроса или вызова ("бот дурак", "пошел на..." без указания сути). Но если наряду с эмоциями есть вопрос по существу ("какой нависающий край?", "где ты увидел трещину?") или ироничный вызов про эндодонтию/роботов ("робот сможет обойти ступень?") — это клинический диалог, отвечай YES!
    - Ветка обсуждения в группе кардинально сменилась, и с момента реплики бота прошло много времени, а текущие сообщения чата посвящены совершенно другой посторонней теме.
 
 Выведи строго одно слово:
-YES — если вопрос содержит клинический интерес, обоснование тактики или консилиумную дискуссию.
-NO — если это явный отказ от общения, завершение диалога ("спасибо", "ок"), нецензурная брань/троллинг или оффтоп.
+YES — если вопрос содержит клинический интерес, обоснование тактики, консилиумную дискуссию или ироничный вызов боту про эндодонтию.
+NO — если это явный отказ от общения, завершение диалога ("спасибо", "ок"), бессмысленная ругань без контекста или оффтоп.
 """
         triage_ctx = {"kind": "llama_triage", "thinking_level": "LOW"}
         response, error = await generate_gemini_text_async(triage_prompt, triage_ctx, timeout=60)
@@ -2444,10 +2445,35 @@ async def search_knowledge_corpus(keywords, query_text=""):
                 except Exception as e:
                     logger.error(f"Error searching stomat_archive.db: {e}")
 
-            wiki_limit = _CORPUS_MAX_CHARS
-            archive_limit = _CORPUS_MAX_CHARS
-            wiki_rows = _CORPUS_OUTPUT_LIMIT
-            archive_rows = _CORPUS_OUTPUT_LIMIT
+            # Адаптивный размер RAG:
+            # Если в запросе мало ключевых слов (keyword_count <= 2) или вопрос короткий (< 40 символов),
+            # ограничиваем суммарный RAG-контекст 2500–3000 символами (8-10 строк) вместо 24 000!
+            # Для больших развернутых кейсов оставляем полный бюджет (_CORPUS_MAX_CHARS = 12000 на каждый корпус).
+            kw_count = len(keywords)
+            q_len = len(query_text.strip()) if query_text else 0
+            is_compact = (kw_count <= 2) or (0 < q_len < 40)
+
+            if is_compact:
+                if wiki_facts and archive_msgs:
+                    wiki_limit = 1500
+                    archive_limit = 1500
+                    wiki_rows = 5
+                    archive_rows = 5
+                elif wiki_facts:
+                    wiki_limit = 2800
+                    archive_limit = 0
+                    wiki_rows = 9
+                    archive_rows = 0
+                else:
+                    wiki_limit = 0
+                    archive_limit = 2800
+                    wiki_rows = 0
+                    archive_rows = 9
+            else:
+                wiki_limit = _CORPUS_MAX_CHARS
+                archive_limit = _CORPUS_MAX_CHARS
+                wiki_rows = _CORPUS_OUTPUT_LIMIT
+                archive_rows = _CORPUS_OUTPUT_LIMIT
 
             wiki_corpus = "\n".join(_rank_corpus_entries(wiki_facts, keywords, max_chars=wiki_limit, output_limit=wiki_rows)) if wiki_facts else ""
             archive_corpus = "\n".join(_rank_corpus_entries(archive_msgs, keywords, max_chars=archive_limit, output_limit=archive_rows)) if archive_msgs else ""
@@ -3830,44 +3856,61 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
                         )
                         return False
 
-                    # Расчет допустимого времени: для прямых ответов боту при спокойном чате (<= 10 сообщений)
-                    # даем до 4 часов (240 мин), при умеренной активности — до 3 часов (180 мин).
+                    # Расчёт допустимого времени:
+                    # - is_parent_bot + явный вопрос: лимита нет совсем. Врач нажал Reply на бота —
+                    #   он адресован боту явно, независимо от времени прошлого ответа.
+                    # - is_parent_bot без явного вопроса: 24 часа (1440 мин).
+                    # - косвенный реплай (чужая ветка): строгие 20 минут.
+                    is_explicit_question = (
+                        "?" in text
+                        or "？" in text
+                        or len(text.strip()) > 15
+                    )
                     if is_parent_bot:
-                        max_allowed_minutes = 240.0 if count_since <= 10 else 180.0
+                        if is_explicit_question:
+                            # Прямой реплай + вопрос — отвечаем всегда, staleness не применяется
+                            max_allowed_minutes = None
+                        else:
+                            max_allowed_minutes = 1440.0  # 24 часа
                     else:
                         max_allowed_minutes = 20.0
 
-                    # Проверка по времени исходного сообщения
-                    ref_dt = None
-                    if direct_parent and getattr(direct_parent, "date", None):
-                        try:
-                            ref_dt = direct_parent.date
-                            if hasattr(ref_dt, "astimezone"):
+                    # Проверка по времени исходного сообщения (только если лимит задан)
+                    if max_allowed_minutes is not None:
+                        ref_dt = None
+                        if direct_parent and getattr(direct_parent, "date", None):
+                            try:
+                                ref_dt = direct_parent.date
+                                if hasattr(ref_dt, "astimezone"):
+                                    ref_dt = ref_dt.astimezone(timezone.utc).replace(tzinfo=None)
+                            except Exception:
+                                pass
+
+                        if not ref_dt:
+                            try:
+                                ref_date_row = await query_db_async(
+                                    "SELECT date FROM messages WHERE msg_id = ?",
+                                    (ref_id,)
+                                )
+                                if ref_date_row and ref_date_row[0][0]:
+                                    ref_dt = _parse_db_date(ref_date_row[0][0])
+                            except Exception as time_err:
+                                logger.error(f"Error checking message age for ref_id {ref_id}: {time_err}")
+
+                        if ref_dt:
+                            if hasattr(ref_dt, "tzinfo") and ref_dt.tzinfo is not None:
                                 ref_dt = ref_dt.astimezone(timezone.utc).replace(tzinfo=None)
-                        except Exception:
-                            pass
-
-                    if not ref_dt:
-                        try:
-                            ref_date_row = await query_db_async(
-                                "SELECT date FROM messages WHERE msg_id = ?",
-                                (ref_id,)
-                            )
-                            if ref_date_row and ref_date_row[0][0]:
-                                ref_dt = _parse_db_date(ref_date_row[0][0])
-                        except Exception as time_err:
-                            logger.error(f"Error checking message age for ref_id {ref_id}: {time_err}")
-
-                    if ref_dt:
-                        if hasattr(ref_dt, "tzinfo") and ref_dt.tzinfo is not None:
-                            ref_dt = ref_dt.astimezone(timezone.utc).replace(tzinfo=None)
-                        elapsed_min = (datetime.utcnow() - ref_dt).total_seconds() / 60.0
-                        if elapsed_min > max_allowed_minutes:
-                            logger.info(
-                                f"Dialogue reply is stale by time ({elapsed_min:.1f}m > {max_allowed_minutes}m) "
-                                f"since ref_msg {ref_id} (is_parent_bot={is_parent_bot}). Skipping."
-                            )
-                            return False
+                            elapsed_min = (datetime.utcnow() - ref_dt).total_seconds() / 60.0
+                            if elapsed_min > max_allowed_minutes:
+                                logger.info(
+                                    f"Dialogue reply is stale by time ({elapsed_min:.1f}m > {max_allowed_minutes}m) "
+                                    f"since ref_msg {ref_id} (is_parent_bot={is_parent_bot}). Skipping."
+                                )
+                                return False
+                    else:
+                        logger.debug(
+                            f"Direct reply to bot msg {ref_id} with explicit question — no staleness limit applied."
+                        )
 
                     # Умный анализ продолжения диалога через триаж
                     recent_group_db = await database.get_last_n_messages(limit=5)
@@ -4306,6 +4349,10 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
     - Никаких пустых бессмысленных поддакиваний («Согласен!», «Пациент скажет спасибо»).
     - Говори как опытный, практический врач-эндодонтист у микроскопа: четко, по делу, с клиническими нюансами из реальной практики (размер апикального уступа, конусность, ирригация с УЗ-активацией, экспозиция гипохлорита, выбор биокерамики/эпоксидного силера).
     - КЛИНИЧЕСКИЙ ХУК ДЛЯ ДИСКУССИИ: Чтобы поддержать живую профессиональную беседу в сообществе, завершай ответ 1 коротким, естественным вопросом к коллеге по деталям случая (например: спроси про оптику/микроскоп, рабочую длину, форму изгиба канала, симптоматику на перкуссию или выбранную систему файлов). Вопрос должен звучать профессионально и органично, от коллеги к коллеге, без фальши.
+15.1. РЕАКЦИЯ НА СКЕПСИС И ПОДКОЛЫ О ТОМ, ЧТО ТЫ РОБОТ/ИИ:
+    - Если коллега подкалывает за то, что ты робот или машина («какой ты нам коллега», «робот не сможет сделать X в каналах»):
+    - Не извиняйся, не оправдывайся и не пиши шаблонное «я языковая модель».
+    - Ответь с живой врачебной самоиронией эндодонтиста: спокойно признай, что тактильное чувство инструмента в канале, работа под микроскопом и ручные навыки у кресла — это безусловная монополия живого доктора, и никакой алгоритм этого не заменит. А твоя роль — держать в памяти протоколы, дозировки и клинические нюансы без усталости к концу смены. Парируй легко, остроумно и с уважением к ручному труду врача.
 
 {style_instruction}
 
@@ -4386,6 +4433,10 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
     - Никаких пустых бессмысленных поддакиваний («Согласен!», «Пациент скажет спасибо»).
     - Говори как опытный, практический врач-эндодонтист у микроскопа: четко, по делу, с клиническими нюансами из реальной практики (размер апикального уступа, конусность, ирригация с УЗ-активацией, экспозиция гипохлорита, выбор биокерамики/эпоксидного силера).
     - КЛИНИЧЕСКИЙ ХУК ДЛЯ ДИСКУССИИ: Чтобы поддержать живую профессиональную беседу в сообществе, завершай ответ 1 коротким, естественным вопросом к коллеге по деталям случая (например: спроси про оптику/микроскоп, рабочую длину, форму изгиба канала, симптоматику на перкуссию или выбранную систему файлов). Вопрос должен звучать профессионально и органично, от коллеги к коллеге, без фальши. Если тема не клиническая и сказать нечего — возвращай IGNORE.
+16.1. РЕАКЦИЯ НА СКЕПСИС И ПОДКОЛЫ О ТОМ, ЧТО ТЫ РОБОТ/ИИ:
+    - Если коллега подкалывает за то, что ты робот или машина («какой ты нам коллега», «робот не сможет сделать X в каналах»):
+    - Не извиняйся, не оправдывайся и не пиши шаблонное «я языковая модель».
+    - Ответь с живой врачебной самоиронией эндодонтиста: спокойно признай, что тактильное чувство инструмента в канале, работа под микроскопом и ручные навыки у кресла — это безусловная монополия живого доктора, и никакой алгоритм этого не заменит. А твоя роль — держать в памяти протоколы, дозировки и клинические нюансы без усталости к концу смены. Парируй легко, остроумно и с уважением к ручному труду врача.
 
 {ignore_instruction}
 
@@ -4659,7 +4710,46 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
 
     # Enforce 2-hour cooldown for passive media trigger, unless it's a direct reply or mention
     is_passive = not (is_direct_reply or is_mentioned)
+
+    # 0. Строгая проверка актуальности (защита от разбора старых снимков из истории):
+    msg_dt = getattr(message, 'date', None)
+    if not msg_dt:
+        try:
+            db_date_row = await query_db_async("SELECT date FROM messages WHERE msg_id = ?", (msg_id,))
+            if db_date_row and db_date_row[0][0]:
+                msg_dt = _parse_db_date(db_date_row[0][0])
+        except Exception as db_dt_err:
+            logger.debug("Error checking media message date: %s", db_dt_err)
+
+    if msg_dt:
+        try:
+            if hasattr(msg_dt, "astimezone"):
+                msg_dt_utc = msg_dt.astimezone(timezone.utc).replace(tzinfo=None)
+            elif hasattr(msg_dt, "tzinfo") and msg_dt.tzinfo is not None:
+                msg_dt_utc = msg_dt.replace(tzinfo=None)
+            else:
+                msg_dt_utc = msg_dt
+            age_minutes = (datetime.utcnow() - msg_dt_utc).total_seconds() / 60.0
+        except Exception:
+            age_minutes = 0.0
+    else:
+        age_minutes = 0.0
+
+    try:
+        cnt_rows = await query_db_async("SELECT COUNT(*) FROM messages WHERE msg_id > ?", (msg_id,))
+        count_since = cnt_rows[0][0] if cnt_rows else 0
+    except Exception:
+        count_since = 0
+
     if is_passive:
+        # Для пассивных снимков: максимум 15 минут с момента отправки и не более 8 сообщений после него
+        if age_minutes > 15.0 or count_since > 8:
+            logger.info(
+                "Media Assistant: passive media msg_id=%s is stale (age=%.1fm > 15m, count=%s > 8). Skipping.",
+                msg_id, age_minutes, count_since,
+            )
+            return False
+
         last_run = datetime.fromisoformat(state.get("last_passive_media_run", "2000-01-01T00:00:00"))
         if datetime.now() - last_run < timedelta(minutes=120):
             elapsed_min = int((datetime.now() - last_run).total_seconds() / 60)
@@ -4668,7 +4758,15 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
                 elapsed_min,
                 msg_id,
             )
-            return  # Within 2-hour cooldown, skip!
+            return False  # Within 2-hour cooldown, skip!
+    else:
+        # Для прямого обращения/упоминания: максимум 120 минут и не более 25 сообщений
+        if age_minutes > 120.0 or count_since > 25:
+            logger.info(
+                "Media Assistant: direct media msg_id=%s is stale (age=%.1fm > 120m, count=%s > 25). Skipping.",
+                msg_id, age_minutes, count_since,
+            )
+            return False
 
     # Construct a simple event-like object for direct compatibility
     class MediaEvent:
@@ -4783,9 +4881,9 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
 Ты — практикующий оперирующий стоматолог, эндодонтист и микроскопист у кресла с 15-летним стажем клинической практики. Читаешь чат коллег "EndoChat". Тебе прислали клиническое изображение/снимок.
 Дай авторитетный, структурированный клинический разбор — как отвечает опытный клиницист: уверенно, системно, видя всю зубочелюстную систему, без академической воды и лекторской зауми.
 
-Описание изображения (распознано моделью зрения — это НЕ факт, а прочтение снимка машиной):
+Предварительное ориентировочное описание снимка:
 {media_description}
-[ДОСТОВЕРНОСТЬ ОПИСАНИЯ: модель зрения способна «увидеть» на снимке то, чего там нет. Не повторяй её формулировки как установленный факт и не строй на одной такой детали категоричный вывод. Если ключевая для ответа находка держится только на описании — так и скажи, что судишь по снимку в чате, и назови, что стоило бы проверить (прицельный, КТ, зондирование, анамнез).]
+[ОРИЕНТИР ПО СНИМКУ: опирайся строго на реальные анатомические ориентиры и то, что объективно видно на изображении. Если в ориентировочном описании упомянуты структуры или патологии, которых нет на снимке — молча игнорируй их. Ни в коем случае не спорь с описанием вслух и не упоминай его в ответе!]
 {multimodal_notice}
 
 
@@ -4829,9 +4927,11 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
 7. ПРОАКТИВНОСТЬ: Если клиническая картина неоднозначна — задай коллегам прицельные вопросы (симптоматика, анамнез, тест, другая проекция).
 8. НЕМЕДИЦИНСКИЙ КОНТЕНТ: если изображение явно не клиническое (не снимок зубов, не рентген, не лабораторный скан) — не выдумывай патологию. Коротко опиши что видишь, при желании — свяжи с врачебными буднями.
 9. ПРАВИЛО СОМНЕНИЯ: незнакомый термин или концепция — честно признай, что не встречал, и спроси что имеется в виду. Не гадай и не объявляй бредом.
-10. МЕТА-ПРАВИЛО: Категорически запрещено обсуждать разработку бота, триггеры, команды, админов или притворяться живым участником чата, жалующимся на бота. Если просят помолчать — вежливо извинись одной фразой и умолкни.
-11. КРИТИЧЕСКАЯ ФИЛЬТРАЦИЯ МАШИННОГО ЗРЕНИЯ:
-    - Описание от модели зрения — предварительная гипотеза машины; может содержать визуальные артефакты и домысливание. Не повторяй её формулировки как факт.
+10. СТРОЖАЙШИЙ ЗАПРЕТ НА МЕТА-ЛЕКСИКУ ИИ И ОБСУЖДЕНИЕ БОТА:
+    - КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО использовать слова и фразы: «нейросеть», «модель зрения», «ИИ», «искусственный интеллект», «машина», «алгоритм», «фантазии нейросети», «ошибка модели», «робот» (в клиническом разборе)!
+    - КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО спорить с «нейросетью», комментировать работу моделей или упоминать автоматический анализ снимка. Ты — врач-стоматолог у кресла. Если на снимке нет имплантата или дефекта, пиши просто: «На представленном снимке имплантатов не визуализируется...».
+    - Категорически запрещено обсуждать разработку бота, триггеры, команды или админов. Если просят помолчать — вежливо извинись одной фразой и умолкни.
+11. КЛИНИЧЕСКАЯ ВЕРИФИКАЦИЯ И ТОЧНОСТЬ:
     - Оценивай только то, что реально представлено на изображении. Запрещено домысливать патологию, дефекты или анатомические структуры, которых нет в данных снимка и контексте автора.
     - Если снимок выполнен качественно и этап соблюдён — дай профессиональную валидацию без выдумывания мнимых недостатков.
 
@@ -4900,6 +5000,19 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
         
     reply_text = reply_text.strip()
     reply_text = clean_html_formatting(reply_text)
+
+    # Защитная зачистка любых случайных мета-фраз про ИИ/нейросети в клиническом ответе
+    if is_dental and reply_text:
+        reply_text = re.sub(
+            r'(?i)\b(?:если\s+отбросить|не\s+учитывая|без\s+учёта)?\s*фантази[ий]\s+нейросет[ией]\s*(?:про|относительно|насчет)?\s*',
+            '',
+            reply_text
+        ).strip()
+        reply_text = re.sub(r'(?i)\b(?:модел[ьи]\s+зрени\w*|нейросет\w*|искусственн\w+\s+интеллект\w*)\b', '', reply_text)
+        reply_text = re.sub(r'^[,\s—–-]+', '', reply_text)
+        reply_text = re.sub(r'\s{2,}', ' ', reply_text).strip()
+        if reply_text and reply_text[0].islower():
+            reply_text = reply_text[0].upper() + reply_text[1:]
 
     # Парсинг опциональной реакции из media-ответа (те же правила что в text-пути)
     _media_pending_reaction: str | None = None
@@ -8799,7 +8912,7 @@ async def handle_private_message(bot_client, event):
                     )
                     return
 
-            all_protos = await database.get_clinical_protocols(limit=20)
+            all_protos = await database.get_clinical_protocols(limit=100)
             msg_text, btns = protocol_extractor.format_protocol_catalog(all_protos)
             await bot_client.send_message(entity=chat_id, message=msg_text, buttons=btns, parse_mode='html')
             return
@@ -10441,7 +10554,7 @@ async def handle_group_pm_redirect(bot_client, event, cmd: str) -> bool:
                 ]
                 await bot_client.send_message(entity=sender_id, message=profile_card, buttons=profile_buttons, parse_mode='html')
             else:
-                all_protos = await database.get_clinical_protocols(limit=20)
+                all_protos = await database.get_clinical_protocols(limit=100)
                 msg_proto, proto_btns = protocol_extractor.format_protocol_catalog(all_protos)
                 await bot_client.send_message(entity=sender_id, message=msg_proto, buttons=proto_btns, parse_mode='html')
     except Exception as dm_err:
@@ -12130,7 +12243,7 @@ async def handle_quiz_callback(bot_client, event):
             
         elif nav_target in ("proto", "protocols"):
             import protocol_extractor
-            all_protos = await database.get_clinical_protocols(limit=20)
+            all_protos = await database.get_clinical_protocols(limit=100)
             msg_text, btns = protocol_extractor.format_protocol_catalog(all_protos)
             await edit_callback_message(bot_client, event, msg_text,
                                        "edit_message:proto_list", buttons=btns,
@@ -13217,7 +13330,7 @@ async def handle_quiz_callback(bot_client, event):
 
     if data_str in ("proto:back", "proto:list"):
         import protocol_extractor
-        all_protos = await database.get_clinical_protocols(limit=20)
+        all_protos = await database.get_clinical_protocols(limit=100)
         msg_text, btns = protocol_extractor.format_protocol_catalog(all_protos)
         await edit_callback_message(bot_client, event, msg_text,
                                    "edit_message:proto_list", buttons=btns,
@@ -13229,7 +13342,7 @@ async def handle_quiz_callback(bot_client, event):
         import protocol_extractor
         category = data_str[10:].strip()
         cat_filter = None if category == "all" else category
-        protos = await database.get_clinical_protocols(category=cat_filter, limit=20)
+        protos = await database.get_clinical_protocols(category=cat_filter, limit=100)
         msg_text, btns = protocol_extractor.format_protocol_catalog(protos, category_filter=cat_filter)
         await edit_callback_message(bot_client, event, msg_text,
                                    "edit_message:proto_cat", buttons=btns,

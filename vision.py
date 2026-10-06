@@ -509,21 +509,31 @@ async def describe_image(file_paths, caption: str = None, is_passive: bool = Fal
                                     # русского чата, и отвечающая модель вынуждена
                                     # переводить чужой текст. Проверяем результат,
                                     # а не надеемся на послушание модели.
-                                    if _is_mostly_cyrillic(text):
+                                    russian_text = text
+                                    if not _is_mostly_cyrillic(text):
+                                        logger.info(
+                                            "Vision answered in non-Russian via %s (%s). Translating to Russian via lightweight call...",
+                                            provider, model_name,
+                                        )
+                                        translated = await _translate_description_to_russian(text, client, provider)
+                                        if translated:
+                                            russian_text = translated
+
+                                    if _is_mostly_cyrillic(russian_text):
                                         logger.info(f"Vision success via {provider} ({model_name})")
                                         gemini_client.note_success(provider, api_key, model_name=model_name)
-                                        _RECENT_IMAGE_URLS[text[:60]] = image_urls
+                                        _RECENT_IMAGE_URLS[russian_text[:60]] = image_urls
                                         if len(_RECENT_IMAGE_URLS) > 50:
                                             _RECENT_IMAGE_URLS.pop(next(iter(_RECENT_IMAGE_URLS)))
                                         if not skip_cache and cache_key:
-                                            _VISION_CACHE[cache_key] = {"text": text, "ts": time.time()}
+                                            _VISION_CACHE[cache_key] = {"text": russian_text, "ts": time.time()}
                                             _save_vision_cache(_VISION_CACHE)
-                                        return VisionDescription(text, image_urls=image_urls)
+                                        return VisionDescription(russian_text, image_urls=image_urls)
 
                                     if english_fallback is None:
                                         english_fallback = text
                                     logger.warning(
-                                        "Vision answered not in Russian via %s (%s); trying next model",
+                                        "Vision answered not in Russian and translation failed via %s (%s); trying next model",
                                         provider, model_name,
                                     )
                                     break

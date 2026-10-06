@@ -694,7 +694,7 @@ def _build_journal_html(
     </div>
 
     <div class="issue-summary-bar">
-        <div class="issue-summary-item">🔬 Стандарт: <strong>Evidence-Based Endodontics (AAE / ESE)</strong></div>
+        <div class="issue-summary-item">🔬 Стандарт: <strong>Практическая клиническая эндодонтия</strong></div>
         <div class="issue-summary-item">🦷 Сообщество: <strong>EndoChat (Эндодонтия под микроскопом)</strong></div>
         <div class="issue-summary-item">📍 Источник: <strong>Практикующие врачи-эндодонтисты</strong></div>
     </div>

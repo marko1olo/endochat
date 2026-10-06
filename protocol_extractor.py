@@ -38,26 +38,41 @@ _STEP_MARKERS = {
 }
 
 
+# Маркеры вопросов/сомнений, исключающие кандидатность сообщения в протокол
+_QUESTION_INQUIRY_STARTERS = (
+    "подскажите", "кто подскажет", "как думаете", "что посоветуете",
+    "чем лучше", "кто как делает", "в чем причина", "что делать",
+    "кто сталкивался", "посоветуйте", "как правильно", "вопрос коллегам"
+)
+
+
 def is_protocol_candidate(text: str) -> bool:
     """
     Быстрый фильтр: определяет, содержит ли текст подробное описание клинического протокола.
-    Исключает тривиальные вопросы вида «какой протокол травления?».
+    Исключает клинические вопросы врачей, споры и короткие реплики.
     """
-    if not text or len(text.strip()) < 130:
+    if not text or len(text.strip()) < 180:
         return False
 
-    t_lower = text.lower()
+    t_lower = text.lower().strip()
 
-    # Не является кандидатом, если это чисто вопросительное предложение без пояснений
-    if t_lower.endswith("?") and len(text.splitlines()) <= 2 and "протокол" in t_lower and not any(c.isdigit() for c in t_lower):
+    # 1. Отсекаем вопросы (врач спрашивает совет, а не делится алгоритмом)
+    if any(t_lower.startswith(starter) or f"коллеги, {starter}" in t_lower[:70] for starter in _QUESTION_INQUIRY_STARTERS):
+        return False
+    if t_lower.endswith("?") and "?" not in t_lower[:-1] and len(t_lower.splitlines()) <= 3:
+        return False
+    # Если в тексте 2+ знака вопроса и нет нумерованных шагов — это опрос/вопрос, а не протокол
+    has_numbered_steps = bool(re.search(r'(?:^|\n|\s)(?:[1-9][\.\)]\s*|\bэтап\s*[1-9]|\bшаг\s*[1-9])', t_lower))
+    if t_lower.count("?") >= 2 and not has_numbered_steps:
         return False
 
+    # 2. Процедурные стоматологические термины
     has_proc_term = any(term in t_lower for term in _DENTAL_PROCEDURAL_TERMS)
     if not has_proc_term:
         return False
 
+    # 3. Маркеры алгоритма/шагов
     has_step_marker = any(marker in t_lower for marker in _STEP_MARKERS)
-    has_numbered_steps = bool(re.search(r'(?:^|\n|\s)(?:[1-9]\.|\bэтап\s*[1-9]|\bшаг\s*[1-9]|[1-9]\))', t_lower))
 
     return has_step_marker or has_numbered_steps
 
@@ -94,15 +109,20 @@ async def extract_protocol_from_text_async(
         return None
 
     prompt = f"""Ты — ведущий эксперт-методолог доказательной стоматологии (Evidence-Based Dentistry).
-Врач-стоматолог в профессиональном сообществе поделился клиническим протоколом/методикой.
-Твоя задача: структурировать этот клинический опыт в эталонный протокол.
+Врач-стоматолог в профессиональном сообществе поделился сообщением.
+Твоя задача: проверить, содержит ли сообщение РЕАЛЬНЫЙ пошаговый клинический протокол лечения, и если да — структурировать его.
 
 Исходный текст врача:
 <text>
 {text[:3500]}
 </text>
 
-КРИТИЧЕСКИЕ ТРЕБОВАНИЯ:
+КРИТИЧЕСКИЙ ФИЛЬТР:
+Если в тексте врач задает вопрос, просит совета («подскажите», «чем лучше»), сомневается, описывает неудачу без рецепта её решения, или текст не содержит реального пошагового клинического алгоритма — верни СТРОГО:
+{{"is_protocol": false, "reason": "текст является вопросом или обсуждением без пошагового алгоритма"}}
+Категорически запрещено выдумывать шаги, которых нет в тексте врача!
+
+ЕСЛИ текст действительно содержит реальный клинический протокол или пошаговую методику:
 1. Выдели точное клиническое название протокола (title), например: «Адгезивная фиксация керамических виниров E.max» или «Протокол распломбировки каналов, обтурированных резорцин-формалином».
 2. Определи категорию (category): строго одна из: "Ортопедия", "Терапия", "Эндодонтия", "Хирургия", "Пародонтология", "Гнатология", "Общая стоматология".
 3. Выдели четкие клинические показания (indication) и противопоказания/ограничения (contraindications).
@@ -111,8 +131,9 @@ async def extract_protocol_from_text_async(
 6. Выдели критические клинические нюансы и подводные камни (key_nuances) — на что обратить особое внимание, чтобы избежать осложнений.
 7. Верни результат СТРОГО в формате JSON:
 {{
+  "is_protocol": true,
   "title": "Название протокола",
-  "category": "Ортопедия",
+  "category": "Эндодонтия",
   "indication": "Показания к применению",
   "contraindications": "Противопоказания или анатомические ограничения",
   "steps": [
@@ -132,7 +153,11 @@ async def extract_protocol_from_text_async(
             return None
 
         parsed = _clean_json_str(response.text)
-        if not parsed or not parsed.get("title") or not parsed.get("steps"):
+        if not parsed or not parsed.get("is_protocol", True):
+            logger.info("Protocol extraction: candidate rejected by LLM (%s)", parsed.get("reason") if parsed else "no json")
+            return None
+
+        if not parsed.get("title") or not parsed.get("steps") or len(parsed.get("steps", [])) < 2:
             logger.debug(f"Protocol parsing returned incomplete JSON: {response.text[:100]}")
             return None
 
@@ -291,13 +316,16 @@ _DEFAULT_COMMUNITY_PROTOCOLS = [
 ]
 
 
-async def seed_default_protocols_async():
-    """Заполняет базу данных эталонными клиническими протоколами, если таблица пуста."""
+async def seed_default_protocols_async(force: bool = False):
+    """Заполняет базу данных эталонными клиническими протоколами, если таблица пуста (или force=True)."""
     try:
         existing = await database.get_clinical_protocols(limit=1)
-        if not existing:
+        if not existing or force:
             logger.info("Seeding default clinical protocols into database...")
             for proto in _DEFAULT_COMMUNITY_PROTOCOLS:
+                existing_item = await database.search_clinical_protocols(proto["title"], limit=1)
+                if existing_item and any(e.get("title") == proto["title"] for e in existing_item):
+                    continue
                 steps_json = json.dumps(proto["steps"], ensure_ascii=False)
                 await database.save_clinical_protocol(
                     title=proto["title"],
@@ -310,7 +338,7 @@ async def seed_default_protocols_async():
                     author_doctor=proto["author_doctor"],
                     source_msg_id=proto["source_msg_id"],
                 )
-            logger.info("Successfully seeded 5 core clinical protocols.")
+            logger.info("Successfully seeded default clinical protocols.")
     except Exception as e:
         logger.error(f"Failed to seed default protocols: {e}")
 
@@ -381,8 +409,12 @@ def format_protocol_view(proto: dict) -> Tuple[str, list]:
 
     text = "\n".join(out)
 
+    back_row = [Button.inline("⬅️ К списку протоколов", data="proto:list")]
+    if category in ("Эндодонтия", "Ортопедия", "Терапия", "Хирургия", "Гнатология"):
+        back_row.append(Button.inline(f"📂 В «{category}»", data=f"proto:cat:{category}"))
     buttons = [
-        [Button.inline("⬅️ К списку протоколов", data="proto:list"), Button.inline("🏠 Главное меню", data="nav:main")]
+        back_row,
+        [Button.inline("🏠 Главное меню", data="nav:main")]
     ]
     return text, buttons
 
@@ -397,26 +429,38 @@ def format_protocol_catalog(
     from telethon import Button
 
     header_title = f"категории «{category_filter}»" if category_filter else "Базы Знаний"
+    total_cnt = len(protocols)
     out = [
-        f"📚 <b>Клинические протоколы {header_title}:</b>",
+        f"📚 <b>Клинические протоколы {header_title}</b> (всего: {total_cnt}):",
         "Ниже представлены проверенные алгоритмы доказательной стоматологии (EBM), сформированные на основе клинических разборов сообщества.\n"
     ]
 
-    buttons = []
-    cat_buttons = [
-        Button.inline("🦷 Ортопедия", data="proto:cat:Ортопедия"),
-        Button.inline("🩸 Эндодонтия", data="proto:cat:Эндодонтия"),
-        Button.inline("🔪 Хирургия", data="proto:cat:Хирургия"),
+    buttons = [
+        [
+            Button.inline("🩸 Эндодонтия", data="proto:cat:Эндодонтия"),
+            Button.inline("🦷 Ортопедия", data="proto:cat:Ортопедия"),
+        ],
+        [
+            Button.inline("🩺 Терапия", data="proto:cat:Терапия"),
+            Button.inline("🔪 Хирургия", data="proto:cat:Хирургия"),
+        ],
+        [
+            Button.inline("📐 Гнатология", data="proto:cat:Гнатология"),
+        ]
     ]
-    buttons.append(cat_buttons)
+
+    max_display = 16
+    display_protos = protocols[:max_display]
 
     row = []
-    for idx, p in enumerate(protocols[:10], 1):
+    for idx, p in enumerate(display_protos, 1):
         p_id = p["id"]
         p_title = p["title"]
         p_cat = p.get("category", "")
-        out.append(f"<b>{idx}.</b> {p_title} <i>({p_cat})</i>")
-        btn = Button.inline(f"📖 #{idx} {p_title[:18]}...", data=f"proto:view:{p_id}")
+        author = p.get("author_doctor", "")
+        author_hint = f" • <i>{author.split('/')[0].strip()[:18]}</i>" if author else ""
+        out.append(f"<b>{idx}.</b> {p_title} <i>({p_cat})</i>{author_hint}")
+        btn = Button.inline(f"📖 #{idx} {p_title[:17]}...", data=f"proto:view:{p_id}")
         row.append(btn)
         if len(row) == 2:
             buttons.append(row)
@@ -424,6 +468,9 @@ def format_protocol_catalog(
 
     if row:
         buttons.append(row)
+
+    if total_cnt > max_display:
+        out.append(f"\n<i>Показано {max_display} из {total_cnt} протоколов. Выберите категорию выше для точной фильтрации.</i>")
 
     out.append("\n👇 <i>Нажмите на кнопку с протоколом для открытия полной пошаговой карты.</i>")
     buttons.append([Button.inline("🔄 Все протоколы", data="proto:list"), Button.inline("🏠 Меню", data="nav:main")])

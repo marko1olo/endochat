@@ -373,7 +373,7 @@ async def init_db():
     await purge_broken_media_remote_urls()
 
 
-async def get_messages_for_daily_summary(start_time, end_time, min_count=100):
+async def get_messages_for_daily_summary(start_time, end_time, min_count=100, allow_backfill=False):
     def operation():
         with _connection() as db:
             period_messages = db.execute(
@@ -387,25 +387,8 @@ async def get_messages_for_daily_summary(start_time, end_time, min_count=100):
             ).fetchall()
 
             total_msgs = list(period_messages)
-            if len(total_msgs) < min_count:
+            if allow_backfill and len(total_msgs) < min_count:
                 # Добор из прошлого — только то, что ещё НЕ уходило в сводку.
-                # Без этого условия в тихий день дайджест пересказывал
-                # сообществу вчерашний.
-                #
-                # Замер на локальном снимке базы (144 дня, снимок может
-                # отставать от боевого): добор срабатывает на 15 днях и
-                # поднимает 495 сообщений, из которых 442 (89%) уже
-                # публиковались; в худший день повторами были все 66 из 100.
-                # Числа — про масштаб; сам дефект от них не зависит, он в том,
-                # что запрос игнорировал флаг, заведённый ровно для этого.
-                # Флаг для того и заведён, см. mark_messages_as_summarized:
-                # «сообщение, уже ушедшее в сводку, не должно всплыть в
-                # следующей ещё раз» — здесь это правило и нарушалось.
-                #
-                # Добор по msg_id в ORDER BY — по той же причине, что в
-                # get_last_n_messages: граница LIMIT падает внутрь одной секунды
-                # в 5.5% случаев, и без второго ключа непонятно, какую из реплик
-                # секунды взяли, а какую оставили следующему разу.
                 needed = min_count - len(total_msgs)
                 old_messages = db.execute(
                     """
