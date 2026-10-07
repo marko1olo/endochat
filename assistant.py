@@ -4627,6 +4627,7 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
                         pass
                 # Реакция — фоновая задача: не блокирует ответ и не ломает его при сбое
                 if _pending_reaction:
+                    import runtime_guard
                     runtime_guard.create_task(_try_send_reaction(event, msg_id, _pending_reaction), name=f"react_{msg_id}")
                 return True
             except Exception as e:
@@ -5125,6 +5126,7 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
             save_state(state)
             # Реакция на медиа-сообщение: фоновая задача, не блокирует ответ
             if _media_pending_reaction:
+                import runtime_guard
                 runtime_guard.create_task(_try_send_reaction(event, msg_id, _media_pending_reaction), name=f"media_react_{msg_id}")
         except Exception as e:
             logger.error(f"Failed to send direct media assistant reply: {e}")
