@@ -3553,56 +3553,72 @@ async def health_watchdog_task():
             return
 
 async def _catchup_missed_mentions(bot_client, window_minutes: int = 30):
-    """При рестарте: ищем @упоминания бота за последние window_minutes минут
-    на которые бот не успел ответить. Отвечаем через check_bot_mention_trigger."""
+    """При рестарте: ищем сообщения из БД за последние window_minutes минут
+    на которые бот не ответил — отвечаем через check_bot_mention_trigger.
+    Работает даже если @mention был удалён другим ботом, т.к. само сообщение в БД."""
     try:
+        import runtime_guard as _rg
         bot_username = (getattr(assistant, "BOT_USERNAME", None) or FALLBACK_BOT_USERNAME or "endohelp_bot").lstrip("@").lower()
         bot_id = getattr(assistant, "BOT_ID", None) or FALLBACK_BOT_ID
         chat_id = config.SOURCE_CHAT_ID
-        cutoff = datetime.utcnow() - timedelta(minutes=window_minutes)
+        cutoff_utc = (datetime.utcnow() - timedelta(minutes=window_minutes)).strftime("%Y-%m-%d %H:%M:%S")
 
-        msgs = await asyncio.wait_for(
-            client.get_messages(chat_id, limit=60),
-            timeout=20
+        # Берём из БД сообщения за окно — не от бота
+        rows = await database.query_db_async(
+            """SELECT msg_id, sender_id, sender_name, text, has_media, media_description
+               FROM messages
+               WHERE date >= ? AND sender_id != ?
+               ORDER BY msg_id DESC LIMIT 60""",
+            (cutoff_utc, bot_id)
         )
-        if not msgs:
+        if not rows:
             return
 
-        # Собираем id всех сообщений бота за окно — они уже-ответы
-        bot_msg_ids = set()
-        for m in msgs:
-            if getattr(m, "date", None) and m.date.replace(tzinfo=None) < cutoff:
-                continue
-            sender_id = getattr(m, "sender_id", None) or getattr(getattr(m, "from_id", None), "user_id", None)
-            if sender_id == bot_id:
-                # reply_to_msg_id — на что отвечал бот
-                rto = getattr(m, "reply_to", None)
-                if rto:
-                    bot_msg_ids.add(getattr(rto, "reply_to_msg_id", None))
+        # id сообщений бота за то же окно
+        bot_rows = await database.query_db_async(
+            """SELECT reply_to_msg_id FROM messages
+               WHERE date >= ? AND sender_id = ? AND reply_to_msg_id IS NOT NULL""",
+            (cutoff_utc, bot_id)
+        )
+        bot_replied_to = {r[0] for r in bot_rows if r[0]}
 
-        # Ищем @bot_username без ответа
-        for m in reversed(msgs):
-            if getattr(m, "date", None) and m.date.replace(tzinfo=None) < cutoff:
+        # Ищем: @bot_username в тексте ИЛИ медиа с текстом-призывом оценить/помочь — без ответа бота
+        target = None
+        for row in rows:
+            msg_id, sender_id, sender_name, text, has_media, media_desc = row
+            if msg_id in bot_replied_to:
                 continue
-            sender_id = getattr(m, "sender_id", None) or getattr(getattr(m, "from_id", None), "user_id", None)
-            if sender_id == bot_id:
-                continue
-            text = getattr(m, "text", "") or getattr(m, "message", "") or ""
-            if f"@{bot_username}" not in text.lower():
-                continue
-            if m.id in bot_msg_ids:
-                continue  # бот уже ответил на это
-            logger.info("📬 Catchup: нашли пропущенное упоминание msg_id=%s, обрабатываем...", m.id)
-            sender = getattr(m, "sender", None)
-            sender_name = getattr(sender, "first_name", None) or ""
+            text = text or ""
+            # прямое упоминание
+            is_mention = f"@{bot_username}" in text.lower()
+            # медиа с призывом (короткий текст + фото — просьба оценить)
+            is_media_ask = has_media and len(text.strip()) > 0 and len(text.strip()) < 80
+            if is_mention or is_media_ask:
+                target = (msg_id, sender_name, text, has_media, media_desc)
+                break  # самое свежее
+
+        if not target:
+            return
+
+        msg_id, sender_name, text, has_media, media_desc = target
+        logger.info("📬 Catchup: пропущенный msg_id=%s от %s, генерим ответ...", msg_id, sender_name)
+
+        # Получаем объект сообщения из Telegram для передачи в trigger
+        try:
+            tg_msg = await asyncio.wait_for(client.get_messages(chat_id, ids=msg_id), timeout=15)
+        except Exception:
+            tg_msg = None
+
+        if tg_msg:
             try:
                 await asyncio.wait_for(
-                    assistant.check_bot_mention_trigger(bot_client, m, m.id, text, sender_name),
-                    timeout=60
+                    assistant.check_bot_mention_trigger(bot_client, tg_msg, msg_id, text, sender_name),
+                    timeout=90
                 )
             except Exception as ce:
-                logger.warning("Catchup mention reply failed for msg_id=%s: %s", m.id, ce)
-            break  # только самое свежее пропущенное упоминание
+                logger.warning("Catchup reply failed for msg_id=%s: %s", msg_id, ce)
+        else:
+            logger.warning("Catchup: не удалось получить msg_id=%s из Telegram (возможно удалено)", msg_id)
     except Exception as e:
         logger.warning("_catchup_missed_mentions error: %s", e)
 
