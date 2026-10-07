@@ -3552,6 +3552,61 @@ async def health_watchdog_task():
             await client.disconnect()
             return
 
+async def _catchup_missed_mentions(bot_client, window_minutes: int = 30):
+    """При рестарте: ищем @упоминания бота за последние window_minutes минут
+    на которые бот не успел ответить. Отвечаем через check_bot_mention_trigger."""
+    try:
+        bot_username = (getattr(assistant, "BOT_USERNAME", None) or FALLBACK_BOT_USERNAME or "endohelp_bot").lstrip("@").lower()
+        bot_id = getattr(assistant, "BOT_ID", None) or FALLBACK_BOT_ID
+        chat_id = config.SOURCE_CHAT_ID
+        cutoff = datetime.utcnow() - timedelta(minutes=window_minutes)
+
+        msgs = await asyncio.wait_for(
+            client.get_messages(chat_id, limit=60),
+            timeout=20
+        )
+        if not msgs:
+            return
+
+        # Собираем id всех сообщений бота за окно — они уже-ответы
+        bot_msg_ids = set()
+        for m in msgs:
+            if getattr(m, "date", None) and m.date.replace(tzinfo=None) < cutoff:
+                continue
+            sender_id = getattr(m, "sender_id", None) or getattr(getattr(m, "from_id", None), "user_id", None)
+            if sender_id == bot_id:
+                # reply_to_msg_id — на что отвечал бот
+                rto = getattr(m, "reply_to", None)
+                if rto:
+                    bot_msg_ids.add(getattr(rto, "reply_to_msg_id", None))
+
+        # Ищем @bot_username без ответа
+        for m in reversed(msgs):
+            if getattr(m, "date", None) and m.date.replace(tzinfo=None) < cutoff:
+                continue
+            sender_id = getattr(m, "sender_id", None) or getattr(getattr(m, "from_id", None), "user_id", None)
+            if sender_id == bot_id:
+                continue
+            text = getattr(m, "text", "") or getattr(m, "message", "") or ""
+            if f"@{bot_username}" not in text.lower():
+                continue
+            if m.id in bot_msg_ids:
+                continue  # бот уже ответил на это
+            logger.info("📬 Catchup: нашли пропущенное упоминание msg_id=%s, обрабатываем...", m.id)
+            sender = getattr(m, "sender", None)
+            sender_name = getattr(sender, "first_name", None) or ""
+            try:
+                await asyncio.wait_for(
+                    assistant.check_bot_mention_trigger(bot_client, m, m.id, text, sender_name),
+                    timeout=60
+                )
+            except Exception as ce:
+                logger.warning("Catchup mention reply failed for msg_id=%s: %s", m.id, ce)
+            break  # только самое свежее пропущенное упоминание
+    except Exception as e:
+        logger.warning("_catchup_missed_mentions error: %s", e)
+
+
 # --- ОБНОВЛЕННЫЙ START_BOT ---
 async def start_bot():
     """Запуск бота и инициализация всех систем."""
@@ -3628,7 +3683,8 @@ async def start_bot():
     # СИНХРОНИЗАЦИЯ ПЕРЕД ЗАПУСКОМ СЛУШАТЕЛЯ
     await asyncio.wait_for(sync_history(), timeout=SYNC_HISTORY_TIMEOUT_SECONDS)
     await recover_pending_media_analysis()
-    
+    await _catchup_missed_mentions(bot_client)
+
     # heartbeat уже запущен в начале start_bot — до сетевого подъёма.
     runtime_guard.create_task(scheduler_task(bot_client), "scheduler")
     runtime_guard.create_task(pm_ping_scheduler_task(bot_client), "pm_ping_scheduler")
