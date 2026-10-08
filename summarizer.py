@@ -16,6 +16,7 @@ import re
 import html
 import runtime_guard
 import user_memory
+import clinical_cognitive_core
 from collections import Counter
 from blocking_tools import create_telegraph_page_async, generate_gemini_text_async
 from datetime import datetime
@@ -984,6 +985,8 @@ async def process_summary_batch(messages, client, chat_id, topic_id=None, msg_co
     Ты — опытный стоматолог-эндодонтист высшей квалификации и микроскопист. Твоя задача — выжать из чата эндодонтов конкретную клиническую пользу для коллег. 
     Пиши профессионально, ёмко и доказательно, но без пафоса. Представь, что пересказываешь суть сложного разбора коллеге у микроскопа.
 
+    {clinical_cognitive_core.DIGEST_COGNITIVE_ARCHITECTURE}
+
     {full_bonus_instruction}
 
     === ПРАВИЛА ВНИМАНИЯ ===
@@ -1491,6 +1494,8 @@ async def process_weekly_batch(messages, client, chat_id, topic_id=None, deliver
     prompt = f"""
     Ты — главный редактор специализированного клинического издания по эндодонтии и микроскопической стоматологии.
     Твоя задача — написать масштабный, глубокий **КЛИНИЧЕСКИЙ ОБЗОР (ЛОНГРИД)** по материалам профессионального сообщества эндодонтов за неделю в объеме 11 000 – {WEEKLY_CHAR_BUDGET} символов.
+
+    {clinical_cognitive_core.DIGEST_COGNITIVE_ARCHITECTURE}
     === ПРАВИЛА ВНИМАНИЯ ===
     1. Проанализируй ВЕСЬ предоставленный лог недели. Не фокусируйся только на последних сообщениях. 
     2. Если в начале или середине лога была важная дискуссия или разбор, она ОБЯЗАТЕЛЬНО должна попасть в отчет.
