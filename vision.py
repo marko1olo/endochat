@@ -10,6 +10,7 @@ import hashlib
 import httpx
 from openai import AsyncOpenAI
 
+import clinical_cognitive_core
 import config
 import gemini_client
 from media_tools import prepare_image_for_analysis

@@ -49,6 +49,11 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 from telethon import types
 from telethon.extensions import html
 
+try:
+    import clinical_cognitive_core
+except ImportError:
+    clinical_cognitive_core = None
+
 logger = logging.getLogger(__name__)
 
 # ==============================================================================
@@ -831,6 +836,57 @@ def generate_evening_poll_debrief(
     return "\n".join(parts)
 
 
+async def synthesize_dynamic_evening_poll_debrief(
+    payload: PollPayload,
+    vote_stats: Dict[str, Any],
+    llm_caller: Callable,
+    timeout: float = 30.0,
+) -> str:
+    """
+    Генерирует расширенный вечерний дебрифинг с динамическим анализом результатов
+    голосования врачей по протоколу POLL_DEBRIEF_ARCHITECTURE.
+    Если LLM недоступен или падает, безопасно возвращает статический разбор.
+    """
+    static_fallback = generate_evening_poll_debrief(payload=payload, vote_stats=vote_stats)
+    if not llm_caller or not payload:
+        return static_fallback
+
+    cognitive_arch = (
+        f"{clinical_cognitive_core.MASTER_COGNITIVE_ARCHITECTURE}\n{clinical_cognitive_core.POLL_DEBRIEF_ARCHITECTURE}"
+        if clinical_cognitive_core else ""
+    )
+    correct_text = "Опрос мнений"
+    if payload.correct_option_id is not None and 0 <= payload.correct_option_id < len(payload.options):
+        correct_text = payload.options[payload.correct_option_id]
+
+    prompt = f"""Ты — ведущий клинический эксперт сообщества эндодонтистов EndoChat. Подготовь вечерний разбор завершившегося опроса.
+{cognitive_arch}
+
+ВОПРОС: {payload.question}
+ВАРИАНТЫ: {payload.options}
+ВЕРНЫЙ ОТВЕТ: {correct_text}
+БАЗОВЫЙ КЛИНИЧЕСКИЙ РАЗБОР: {payload.explanation_deep or payload.explanation_brief}
+СТАТИСТИКА ГОЛОСОВАНИЯ: {vote_stats}
+
+ИНСТРУКЦИИ ПО ДЕБРИФИНГУ:
+1. Кратко зафиксируй результат голосования (сколько коллег проголосовало, какой процент выбрал верный путь).
+2. Разбери анатомию ошибки большинства (если многие ошиблись): почему этот дистрактор популярен у кресла, но несет риски второго порядка на дистанции.
+3. Продемонстрируй победу первого принципа: четко, биомеханически/биологически обоснованно и без менторства обоснуй эталонный выбор.
+4. Закончи открытым клиническим вопросом к коллегам ({payload.discussion_seed_question or 'какую тактику обычно выбираете у кресла?'}).
+5. Разметка: только валидный HTML (<b>, <i>, <code>). Никакого Markdown. Длина: до 600–700 символов.
+"""
+    status_ctx = {"kind": "poll_clinical_review", "thinking_level": "HIGH"}
+    try:
+        resp, err = await _call_llm_adapter(llm_caller, prompt, status_ctx, timeout=timeout)
+        if resp and getattr(resp, "text", None):
+            res_text = resp.text.strip()
+            if res_text and len(res_text) > 40:
+                return res_text
+    except Exception as exc:
+        logger.warning("Dynamic poll debrief failed: %s, falling back to static", exc)
+    return static_fallback
+
+
 # ==============================================================================
 # ШАГ 1 И 2: КОНТЕКСТНЫЙ ТРИАЖ ТЕМЫ И ФОРМАТА
 # ==============================================================================
@@ -1105,8 +1161,13 @@ async def generate_poll_content(
 
     cat_display = CATEGORY_NAMES.get(triage.category, triage.category)
 
-    prompt = f"""Ты — практикующий стоматолог-эндодонтист высшей категории с 15-летним стажем работы под микроскопом. Пишешь клинический опрос для своих коллег в сообществе EndoChat.
+    cognitive_arch = (
+        f"{clinical_cognitive_core.MASTER_COGNITIVE_ARCHITECTURE}\n{clinical_cognitive_core.POLL_DEBRIEF_ARCHITECTURE}\n"
+        if clinical_cognitive_core else ""
+    )
 
+    prompt = f"""Ты — практикующий стоматолог-эндодонтист высшей категории с 15-летним стажем работы под микроскопом. Пишешь клинический опрос для своих коллег в сообществе EndoChat.
+{cognitive_arch}
 АУДИТОРИЯ: врачи-эндодонтисты, микроскописты, терапевты и стоматологи общей практики — 5–20 лет у кресла и микроскопа. Читают между приёмами. Воду пропускают мимо.
 
 ЦЕЛЬ: создать момент «стоп — а я бы как поступил?». Врач должен остановиться и задуматься, потому что вопрос цепляет реальную развилку, с которой он сталкивался сам. Это не тест на знание учебника — это спор клинических школ.
@@ -1143,7 +1204,10 @@ explanation_brief:
   Резкий вердикт в одной фразе (до 200 символов!) для всплывающей лампочки Telegram. Без «таким образом», «следовательно», «в заключении».
 
 explanation_deep:
-  3–4 предложения. Структура: (1) четкая биомеханическая или биологическая логика выбора у кресла (СТРОЖАЙШЕ ЗАПРЕЩЕНО писать шаблонные фразы вроде «По консенсусу ESE и AAE», «согласно рекомендациям ассоциации», «по гайдлайнам» — пиши языком оперирующего клинициста!); (2) почему правильный ответ клинически оптимален и дает лучший прогноз; (3) почему другие альтернативы уступают или несут риск осложнений.
+  3–4 предложения. Обоснование строго по протоколу анализа опроса (POLL DEBRIEF CORE):
+  (1) четкая биомеханическая или биологическая логика выбора у кресла (без заученных бюрократических штампов «по консенсусу/гайдлайнам» — языком оперирующего клинициста!);
+  (2) почему правильный ответ клинически оптимален от первопринципов и дает лучший долгосрочный прогноз;
+  (3) анатомия типичного заблуждения и последствия второго порядка: почему альтернативные варианты на дистанции приводят к системным осложнениям и краху.
 
 discussion_seed_question:
   Острый практический вопрос к коллегам в чате для вечернего обсуждения (1-2 предложения, строго до 300 символов).
@@ -1320,9 +1384,11 @@ async def review_poll_quality(
    Клинический кейс (case_intro, если есть) — краткая виньетка строго в 1-3 предложения (до 400 символов!).
    Если case_intro представляет собой простыню на 3+ абзаца или занудный протокол с длинным анамнезом жизни → REJECT.
 
-8. КЛИНИЧЕСКАЯ КОРРЕКТНОСТЬ ПРАВИЛЬНОГО ОТВЕТА (только для типа quiz)
+8. КЛИНИЧЕСКАЯ КОРРЕКТНОСТЬ И ГЛУБИНА РАЗБОРА (только для типа quiz)
    Вариант, отмеченный как правильный, должен соответствовать действующим
    доказательным протоколам. Явное противоречие EBM или клинически опасная тактика → REJECT.
+   Поле explanation_deep должно соответствовать протоколу анализа опроса (POLL DEBRIEF CORE):
+   вскрывать анатомию типичного заблуждения, показывать последствия второго порядка и доказывать победу первого принципа, а не быть пустой отпиской → иначе REJECT.
 
 9. БЕЗОПАСНОСТЬ ДИСТРАКТОРОВ
    Неправильные варианты не должны представлять реально опасную или ятрогенную
