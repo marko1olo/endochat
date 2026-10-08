@@ -699,6 +699,37 @@ class TestPollStorage(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(stats["accuracy_percent"], 70.0)
         self.assertEqual(stats["votes_by_option"], {0: 7, 1: 3})
 
+    async def test_anonymous_poll_string_total_voters_regression(self) -> None:
+        """Регрессионный тест: total_voters хранится как строка из SQLite TEXT-колонки."""
+        poll_id = 998878
+        await poll_storage.save_poll(
+            poll_id=poll_id,
+            chat_id=-100555,
+            poll_type="regular",
+            topic="surgery",
+            question="Тактика при глубоком дефекте?",
+            options=["Удаление", "Резекция", "НТР"],
+            correct_option_id=None,
+            db_path=self.db_path,
+        )
+
+        async with poll_storage.get_db_connection(self.db_path) as db:
+            await db.execute(
+                "UPDATE daily_polls SET total_voters = ?, results_json = ? WHERE id = ?",
+                ("9", '{"0": 1, "1": 5, "2": 3}', poll_id)
+            )
+            await db.commit()
+
+        poll = await poll_storage.get_poll(poll_id, db_path=self.db_path)
+        self.assertIsNotNone(poll)
+        self.assertEqual(poll["total_voters"], 9)
+        self.assertIsInstance(poll["total_voters"], int)
+
+        stats = await poll_storage.get_poll_summary_stats(poll_id, db_path=self.db_path)
+        self.assertEqual(stats["total_votes"], 9)
+        self.assertEqual(stats["votes_by_option"], {0: 1, 1: 5, 2: 3})
+        self.assertEqual(stats["correct_votes"], 0)
+
 
 def run_tests() -> int:
     """Запуск набора тестов с человекочитаемым форматированием."""
