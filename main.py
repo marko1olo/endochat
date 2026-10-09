@@ -988,7 +988,8 @@ async def scheduler_task(bot_client):
                                     explanation_deep=today_tpl.get('explanation_deep') or "",
                                     case_intro=case_intro,
                                     topic=today_tpl.get('topic') or "",
-                                    category=today_tpl.get('topic') or ""
+                                    category=today_tpl.get('topic') or "",
+                                    discussion_seed_question=today_tpl.get('discussion_seed_question')
                                 )
                                 media = poll_engine.build_poll_media(
                                     question=payload.question,
@@ -2696,9 +2697,31 @@ async def handle_new_message(event):
                 # генерация и заметный шум в чате 749 врачей. Совпадение было
                 # точное, не по подстроке, поэтому цена ниже, чем у сводки, но
                 # оснований отвечать на слово «опрос» викториной всё равно нет.
-                # 3. Викторина в группе — тоже только со слешем.
-                if cmd_lower in ("/poll", "/кейс"):
-                    await assistant.handle_group_quiz(bot_client, event)
+                # 3. Нативные опросы и викторины в группе (через poll_engine) — строго для админов!
+                # Обычные врачи решают кейсы в ЛС бота: @endohelp_bot (/quiz), чтобы не спамить в чат сообщества.
+                if cmd_lower in ("/poll", "/опрос", "/батл", "/quiz", "/кейс", "/викторина"):
+                    is_admin_user = False
+                    if event.sender_id in (7716348189, 1890028643):
+                        is_admin_user = True
+                    else:
+                        try:
+                            perms = await event.client.get_permissions(event.chat_id, event.sender_id)
+                            if perms and perms.is_admin:
+                                is_admin_user = True
+                        except Exception:
+                            is_admin_user = False
+
+                    if not is_admin_user:
+                        uname = (getattr(assistant, "BOT_USERNAME", None) or os.getenv("ENDOCHAT_BOT_USERNAME") or "endohelp_bot").lstrip("@")
+                        await bot_client.send_message(
+                            entity=event.chat_id,
+                            message=f"💡 Интерактивные клинические задачи и симулятор доступны в ЛС бота: @{uname} (команда /quiz).",
+                            reply_to=msg_id
+                        )
+                        return True
+
+                    force_poll = "regular" if cmd_lower in ("/poll", "/опрос", "/батл") else "quiz"
+                    await assistant.handle_native_group_poll(bot_client, event, force_type=force_poll)
                     return True
 
 
