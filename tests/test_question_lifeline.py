@@ -10,9 +10,7 @@ import unittest
 
 from question_lifeline import (
     is_clinical_question_candidate,
-    generate_lifeline_response,
-    QuestionLifelineManager,
-    PendingQuestion
+    QuestionLifelineManager
 )
 
 

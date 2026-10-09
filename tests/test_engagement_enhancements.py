@@ -9,8 +9,7 @@
 """
 
 import unittest
-import asyncio
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 import assistant
 from question_lifeline import is_clinical_question_candidate
@@ -21,7 +20,7 @@ class TestEngagementEnhancements(unittest.IsolatedAsyncioTestCase):
     def test_direct_mention_recognition(self):
         """Проверяет распознавание прямых обращений и тегов бота."""
         bot_uname = "endohelp_bot"
-        
+
         # 1. Тег через @
         t1 = "@endohelp_bot какой силер лучше взять для латералки?"
         self.assertTrue(
@@ -64,10 +63,10 @@ class TestEngagementEnhancements(unittest.IsolatedAsyncioTestCase):
         """Проверяет, что в промптах assistant.py удален запрет 'притворяться человеком' и внедрен хук для дискуссии."""
         import inspect
         source = inspect.getsource(assistant)
-        
+
         # Не должно быть запрета притворяться человеком
         self.assertNotIn("Запрещено притворяться человеком", source)
-        
+
         # Должен присутствовать клинический хук для дискуссии
         self.assertIn("КЛИНИЧЕСКИЙ ХУК ДЛЯ ДИСКУССИИ", source)
 

@@ -1150,13 +1150,13 @@ def generate_text(prompt, status_context=None, timeout=None):
                     sleep_time = _retry_sleep_seconds(attempt)
                 else:
                     sleep_time = 5
-                    
+
                 _write_generation_status(
                     status_context, stage=f"{provider}_error",
                     attempt=attempt + 1, max_attempts=max_attempts,
                     key=key_id, error=str(exc)[:500]
                 )
-                
+
                 # Разбор отказа и запись в учёт — в note_key_failure, здесь только
                 # решение, куда идти дальше. Порядок проверок («ключ исчерпан»
                 # ПЕРВЫМ, бан модели вторым) оплачен дефектом и описан там же:
@@ -1711,11 +1711,11 @@ def transcribe_audio_bytes_or_file(file_path, timeout=None):
                 # Ключ ответил — снимаем с него пометку и для текстового каскада.
                 note_success("groq", api_key)
                 logger.info(f"Transcription success chars={len(result_text)}")
-                
+
                 if actual_file_path != file_path and os.path.exists(actual_file_path):
                     try: os.remove(actual_file_path)
                     except Exception: pass
-                    
+
                 return result_text
         except Exception as e:
             logger.warning(f"Whisper transcription failed key={key_id}: {e}")
@@ -1731,11 +1731,11 @@ def transcribe_audio_bytes_or_file(file_path, timeout=None):
                 left = (usable - (time.monotonic() - started)) if usable else 2.0
                 time.sleep(max(0.0, min(2.0, left)))
             continue
-            
+
     if actual_file_path != file_path and os.path.exists(actual_file_path):
         try: os.remove(actual_file_path)
         except Exception: pass
-        
+
     return None
 
 

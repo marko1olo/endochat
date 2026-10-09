@@ -4,7 +4,7 @@ import re
 def test_sieve(limit=5000):
     con = sqlite3.connect(r'c:\Users\danat\Desktop\stomchat\stomat_bot.db')
     cur = con.cursor()
-    
+
     # Query human messages sorted by date or length
     cur.execute("""
         SELECT msg_id, sender_name, text, date 
@@ -13,7 +13,7 @@ def test_sieve(limit=5000):
         ORDER BY msg_id DESC
         LIMIT ?
     """, (limit,))
-    
+
     raw_rows = cur.fetchall()
     rows = [r for r in raw_rows if not any(b in (r[1] or "").lower() for b in ["бот", "bot", "docendo", "endochat", "assistant"])]
     print(f"Loaded {len(rows)} real human messages with len >= 200 (out of {len(raw_rows)})")
@@ -47,7 +47,7 @@ def test_sieve(limit=5000):
 
     for mid, name, text, dt in rows:
         t_low = text.lower().strip()
-        
+
         # 1. Check if predominantly a question
         # If text ends with '?' and has few lines or starts with question marker
         is_q = False
@@ -81,7 +81,7 @@ def test_sieve(limit=5000):
 
     print("\n--- TOP 10 CANDIDATE PROTOCOLS FOUND ---")
     for mid, name, text, dt in passed[:10]:
-        print(f"\n==========================================")
+        print("\n==========================================")
         print(f"MSG #{mid} | Автор: {name} | Дата: {dt} | Символов: {len(text)}")
         print(text[:400] + ("..." if len(text) > 400 else ""))
 

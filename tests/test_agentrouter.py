@@ -1,7 +1,6 @@
 import os
 import sys
 import tempfile
-import time
 
 for _stream in (sys.stdout, sys.stderr):
     try:
@@ -102,9 +101,10 @@ check("Генерация завершилась успешно", res is not Non
 check("Запрос был отправлен к deepseek-v4-flash", len(CAPTURED_CALLS) > 0 and CAPTURED_CALLS[0].get("model") == "deepseek-v4-flash")
 check("max_tokens не ограничен малым лимитом (>= 4096)", CAPTURED_CALLS[0].get("max_tokens", 0) >= 4096)
 
-print(f"\n==============================================================")
-print(f"PASSED: {len(PASS)}   FAILED: {len(FAIL)}")
-if FAIL:
-    print(f"Провалено: {', '.join(FAIL)}")
-    sys.exit(1)
-sys.exit(0)
+if __name__ == "__main__":
+    print("\n==============================================================")
+    print(f"PASSED: {len(PASS)}   FAILED: {len(FAIL)}")
+    if FAIL:
+        print(f"Провалено: {', '.join(FAIL)}")
+        sys.exit(1)
+    sys.exit(0)
