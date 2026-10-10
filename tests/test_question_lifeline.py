@@ -80,7 +80,7 @@ class TestQuestionLifeline(unittest.IsolatedAsyncioTestCase):
             triggered.append((chat_id, reply_to_msg_id, text))
 
         async def fake_llm(prompt, *args, **kwargs):
-            return type("Resp", (), {"text": "Коллега, в подобной развилке ключевое — микроскоп и тонкие файлы.\n\n💬 <i>Коллеги, кто сталкивался?</i>"})(), None
+            return type("Resp", (), {"text": "В подобной развилке ключевое — микроскоп и тонкие файлы.\n\n💬 <i>Кто сталкивался?</i>"})(), None
 
         mgr = QuestionLifelineManager(
             delay_seconds=1,  # 1 секунда для теста
@@ -105,7 +105,7 @@ class TestQuestionLifeline(unittest.IsolatedAsyncioTestCase):
         chat_id, reply_id, text = triggered[0]
         self.assertEqual(chat_id, 888)
         self.assertEqual(reply_id, 5002)
-        self.assertIn("Коллеги", text)
+        self.assertIn("развилке", text)
         self.assertNotIn(5002, mgr.pending_questions)
 
     async def test_lifeline_rate_limiting(self):
