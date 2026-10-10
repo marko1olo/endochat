@@ -12,7 +12,7 @@ import unittest
 from unittest.mock import MagicMock, patch, AsyncMock
 
 # Ensure repo root is in sys.path
-repo_dir = os.path.abspath(os.path.dirname(__file__))
+repo_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if repo_dir not in sys.path:
     sys.path.insert(0, repo_dir)
 
@@ -154,6 +154,10 @@ class TestAssistantMediaGrounding(unittest.IsolatedAsyncioTestCase):
 
         bot_client = MagicMock()
         bot_client.send_message = AsyncMock()
+        bot_me = MagicMock()
+        bot_me.id = 123456
+        bot_me.username = "test_bot"
+        bot_client.get_me = AsyncMock(return_value=bot_me)
         mock_msg = MagicMock()
         mock_msg.id = 99999
         mock_msg.chat_id = -100999
@@ -162,6 +166,8 @@ class TestAssistantMediaGrounding(unittest.IsolatedAsyncioTestCase):
         mock_msg.client = bot_client
 
         with patch.object(assistant, "generate_gemini_text_async", side_effect=fake_generate), \
+             patch.object(assistant, "BOT_ID", 123456), \
+             patch.object(assistant, "BOT_USERNAME", "test_bot"), \
              patch.object(assistant, "load_state", return_value={}), \
              patch.object(assistant, "save_state", return_value=None), \
              patch.object(assistant, "is_silenced", return_value=False), \
