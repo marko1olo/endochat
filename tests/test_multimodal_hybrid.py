@@ -161,7 +161,17 @@ class TestAssistantMediaGrounding(unittest.IsolatedAsyncioTestCase):
         mock_msg.reply_to_msg_id = None
         mock_msg.client = bot_client
 
-        with patch.object(assistant, "generate_gemini_text_async", side_effect=fake_generate),              patch.object(assistant, "load_state", return_value={}),              patch.object(assistant, "save_state", return_value=None),              patch.object(assistant, "is_silenced", return_value=False),              patch.object(assistant.database, "get_last_n_messages", AsyncMock(return_value=[])),              patch.object(assistant, "fetch_dynamic_chat_context", AsyncMock(return_value=(["контекст"], [], []))),              patch.object(assistant, "is_explicitly_non_dental_media", return_value=False),              patch.object(assistant, "search_knowledge_corpus", AsyncMock(return_value=("", ""))),              patch.object(assistant, "check_response_quality", AsyncMock(return_value=(True, "ok"))),              patch.object(assistant, "clean_html_formatting", lambda x: x):
+        with patch.object(assistant, "generate_gemini_text_async", side_effect=fake_generate), \
+             patch.object(assistant, "load_state", return_value={}), \
+             patch.object(assistant, "save_state", return_value=None), \
+             patch.object(assistant, "is_silenced", return_value=False), \
+             patch.object(assistant, "query_db_async", AsyncMock(return_value=[(0,)])), \
+             patch.object(assistant.database, "get_last_n_messages", AsyncMock(return_value=[])), \
+             patch.object(assistant, "fetch_dynamic_chat_context", AsyncMock(return_value=(["контекст"], [], []))), \
+             patch.object(assistant, "is_explicitly_non_dental_media", return_value=False), \
+             patch.object(assistant, "search_knowledge_corpus", AsyncMock(return_value=("", ""))), \
+             patch.object(assistant, "check_response_quality", AsyncMock(return_value=(True, "ok"))), \
+             patch.object(assistant, "clean_html_formatting", lambda x: x):
 
             await assistant.check_and_trigger_assistant_media(
                 bot_client, mock_msg, 99999, "Коллеги, гляньте снимок зуба 46", desc
