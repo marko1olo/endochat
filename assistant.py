@@ -14116,6 +14116,7 @@ async def handle_clinical_ai_generation(bot_client, event, section_type: str, su
     btns.append([Button.inline(b_title, data=b_cb), Button.inline("⬅️ В главное меню", data="nav:main")])
 
     await edit_callback_message(bot_client, event, final_text, f"edit_message:{section_type}_ai_result", buttons=btns, parse_mode='html')
+    await event.answer()
 
 async def handle_quiz_callback(bot_client, event):
     """

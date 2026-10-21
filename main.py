@@ -3172,6 +3172,9 @@ async def handle_callback_query(event):
         # Chairside Clinical Tools fast callback dispatcher
         data_bytes = getattr(event, "data", b"")
         data_str = data_bytes.decode('utf-8', errors='ignore') if isinstance(data_bytes, bytes) else str(data_bytes or "")
+        if data_str == "noop":
+            await event.answer("ℹ️ Информационный раздел", alert=False)
+            return
         if data_str.startswith(("chairside:", "fdi:", "aae:", "files:", "file_sys:", "pres_st:", "pres_eval:", "preserve:", "anes_sos:", "sos:", "file_frag:", "pharma:")):
             if await chairside_tools.dispatch_chairside_callback(bot_client, event, data_str):
                 answered = True
