@@ -2897,15 +2897,17 @@ async def handle_new_message(event):
                 or (bot_uname and bot_uname in text.lower())
                 or "бот" in text.lower()
             )
-            if event.chat_id == config.SOURCE_CHAT_ID and not is_direct_bot_call:
+            is_cmd = bool(text and text.strip().startswith("/"))
+            if event.chat_id == config.SOURCE_CHAT_ID and not is_direct_bot_call and not is_cmd:
                 runtime_guard.create_task(
                     reaction_engine.process_incoming_event(
                         event=event,
                         msg_id=msg_id,
-                        text=text or "",
+                        chat_id=event.chat_id,
+                        sender_id=sender_id,
                         sender_name=sender_name or "Коллега",
-                        has_media=has_media,
-                        sender_id=sender_id
+                        text=text or "",
+                        has_media=has_media
                     ),
                     name=f"react_{msg_id}"
                 )
@@ -4008,6 +4010,7 @@ async def start_bot():
         await client.run_until_disconnected()
     finally:
         await stop_media_analysis_workers()
+        reaction_engine.stop_engine_worker()
         runtime_guard.stop_watchdog()
 
 

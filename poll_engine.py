@@ -1,5 +1,5 @@
 """
-Полноценный многошаговый AI-движок генерации опросов и викторин для StomChat.
+Полноценный многошаговый AI-движок генерации опросов и викторин для EndoChat.
 
 Архитектура пайплайна:
   - Шаг 1: Контекстный триаж темы (Topic & Context Triage)
@@ -932,8 +932,9 @@ def get_weekly_rubric(dt: Optional[datetime.datetime] = None) -> Dict[str, Any]:
     rubric = dict(base_rubric)
     subtopics = base_rubric.get("subtopics", [])
     if subtopics:
-        # Ротация по номеру недели в месяце (0..len(subtopics)-1)
-        week_idx = ((now.day - 1) // 7) % len(subtopics)
+        # Ротация по номеру недели в месяце с учетом времени суток (утро < 13:00 vs день >= 13:00)
+        slot_offset = 1 if now.hour >= 13 else 0
+        week_idx = (((now.day - 1) // 7) + slot_offset) % len(subtopics)
         chosen_subtopic = subtopics[week_idx]
         rubric["subtopic"] = chosen_subtopic
         rubric["topic"] = f"{base_rubric['topic'].split('(')[0].strip()}: {chosen_subtopic}"
@@ -1501,7 +1502,8 @@ async def review_poll_quality(
 
 def get_fallback_preset(
     category: Optional[str] = None,
-    poll_type: Optional[PollType] = None
+    poll_type: Optional[PollType] = None,
+    exclude_topics: Optional[List[str]] = None
 ) -> PollPayload:
     """
     Выбирает проверенный клинический пресет из пула фолбэков.
@@ -1519,24 +1521,30 @@ def get_fallback_preset(
         if filtered_by_type:
             candidates = filtered_by_type
 
+    if exclude_topics:
+        excluded_set = {t.strip().lower() for t in exclude_topics if t}
+        non_excluded = [p for p in candidates if str(p.get("topic", "")).strip().lower() not in excluded_set]
+        if non_excluded:
+            candidates = non_excluded
+
     chosen = dict(random.choice(candidates))
     chosen["source"] = "fallback"
     payload = sanitize_poll_payload(chosen)
     if payload is None:
         # Абсолютный сейфти-нет
         return PollPayload(
-            question="Свежая перфорация дна полости зуба 4.6 (1 мм). Оптимальный материал?",
+            question="Поиск скрытого устья MB2 канала в моляре 1.6 под микроскопом. Оптимальный ориентир?",
             options=[
-                "Минерал триоксид агрегат (МТА)",
-                "Цинк-эвгеноловый цемент",
-                "Гидроксид кальция на 14 дней",
-                "Стеклоиономерный цемент"
+                "По линии перешейка от MB1 медиально-небно на 1-2 мм",
+                "По центру мезиального краевого гребня",
+                "На уровне устья дистально-щечного канала",
+                "В зоне фуркации на дне пульпарной камеры"
             ],
             poll_type=PollType.QUIZ,
             correct_option_id=0,
-            explanation_brief="МТА обеспечивает надежную биосовместимую герметизацию свежей перфорации.",
-            explanation_deep="Материалом выбора для надежного закрытия свежих перфораций является МТА или биокерамика.",
-            topic="Эндодонтия: перфорация",
+            explanation_brief="MB2 располагается на линии перешейка от MB1 в небном направлении на 1-2 мм.",
+            explanation_deep="По анатомическим исследованиям Krasner & Rankow устье MB2 локализуется на перешейке медиально-небно от MB1 в более чем 90% первых верхних моляров.",
+            topic="Эндодонтия: поиск MB2 канала",
             source="fallback"
         )
     return payload
@@ -1593,16 +1601,22 @@ def build_poll_media(
     clean_q = truncate_html_aware(question, MAX_QUESTION_LEN)
     clean_options = [truncate_html_aware(opt, MAX_OPTION_LEN) for opt in options]
 
-    # Обработка HTML-сущностей вопроса
+    # Обработка HTML-сущностей вопроса с гарантией лимита <= 300 символов
     q_text, q_entities = html.parse(clean_q)
+    if len(q_text) > MAX_QUESTION_LEN:
+        q_text = q_text[:MAX_QUESTION_LEN]
+        q_entities = None
     q_twe = types.TextWithEntities(text=q_text, entities=q_entities or [])
 
-    # Сборка ответов опроса
+    # Сборка ответов опроса с гарантией лимита <= 100 символов на каждый вариант
     poll_answers: List[types.PollAnswer] = []
     correct_answers_bytes: Optional[List[bytes]] = [] if is_quiz else None
 
     for i, opt in enumerate(clean_options):
         opt_text, opt_entities = html.parse(opt)
+        if len(opt_text) > MAX_OPTION_LEN:
+            opt_text = opt_text[:MAX_OPTION_LEN]
+            opt_entities = None
         opt_twe = types.TextWithEntities(text=opt_text, entities=opt_entities or [])
         opt_bytes = str(i).encode("utf-8")
         poll_answers.append(types.PollAnswer(text=opt_twe, option=opt_bytes))
@@ -1610,12 +1624,15 @@ def build_poll_media(
         if is_quiz and i == correct_idx:
             correct_answers_bytes.append(opt_bytes)
 
-    # Обработка лампочки (solution) для quiz
+    # Обработка лампочки (solution) для quiz с гарантией лимита <= 200 символов
     sol_text: Optional[str] = None
     sol_entities: Optional[List[types.TypeMessageEntity]] = None
     if is_quiz and explanation:
         clean_exp = truncate_html_aware(explanation, MAX_EXPLANATION_LEN)
         sol_text, sol_entities = html.parse(clean_exp)
+        if sol_text and len(sol_text) > MAX_EXPLANATION_LEN:
+            sol_text = sol_text[:MAX_EXPLANATION_LEN]
+            sol_entities = None
 
     # Генерация уникального ID опроса
     poll_id = random.randint(1, (1 << 63) - 1)
@@ -1648,7 +1665,7 @@ def build_poll_media(
 
 class PollEngine:
     """
-    Многошаговый AI-движок генерации опросов и викторин для StomChat.
+    Многошаговый AI-движок генерации опросов и викторин для EndoChat.
     """
 
     def __init__(self, default_llm_caller: Optional[Callable] = None):
