@@ -89,11 +89,11 @@ _safe_truncate_html = html_safe.safe_truncate_html
 def _get_bot_deep_link():
     try:
         import assistant
-        username = getattr(assistant, "BOT_USERNAME", None) or os.getenv("ENDOCHAT_BOT_USERNAME", "") or os.getenv("STOMCHAT_BOT_USERNAME", "").lstrip("@")
+        raw_user = getattr(assistant, "BOT_USERNAME", None) or os.getenv("ENDOCHAT_BOT_USERNAME") or os.getenv("STOMCHAT_BOT_USERNAME") or "endochatbot"
+        username = str(raw_user).lstrip("@")
     except Exception:
-        username = os.getenv("ENDOCHAT_BOT_USERNAME", "") or os.getenv("STOMCHAT_BOT_USERNAME", "").lstrip("@")
-    if not username:
-        username = "endochatbot"
+        raw_user = os.getenv("ENDOCHAT_BOT_USERNAME") or os.getenv("STOMCHAT_BOT_USERNAME") or "endochatbot"
+        username = str(raw_user).lstrip("@")
     return f'<a href="https://t.me/{username}?start=consult">@{username}</a>'
 
 
@@ -109,11 +109,11 @@ def build_clinical_assistant_cta(format_type: str = "telegraph") -> str:
     """
     try:
         import assistant
-        username = getattr(assistant, "BOT_USERNAME", None) or os.getenv("ENDOCHAT_BOT_USERNAME", "") or os.getenv("STOMCHAT_BOT_USERNAME", "").lstrip("@")
+        raw_user = getattr(assistant, "BOT_USERNAME", None) or os.getenv("ENDOCHAT_BOT_USERNAME") or os.getenv("STOMCHAT_BOT_USERNAME") or "endochatbot"
+        username = str(raw_user).lstrip("@")
     except Exception:
-        username = os.getenv("ENDOCHAT_BOT_USERNAME", "") or os.getenv("STOMCHAT_BOT_USERNAME", "").lstrip("@")
-    if not username:
-        username = "endochatbot"
+        raw_user = os.getenv("ENDOCHAT_BOT_USERNAME") or os.getenv("STOMCHAT_BOT_USERNAME") or "endochatbot"
+        username = str(raw_user).lstrip("@")
 
     if format_type == "telegraph":
         return (
