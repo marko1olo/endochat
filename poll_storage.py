@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Модуль асинхронного хранения данных опросов и статистики врачей (stomat_bot.db).
+Модуль асинхронного хранения данных опросов и статистики врачей (endo_bot.db).
 
 Архитектура таблиц:
 1. daily_polls:
@@ -43,7 +43,7 @@ logger = logging.getLogger(__name__)
 
 # Допустимые типы опросов и тематики
 VALID_POLL_TYPES: Set[str] = {"quiz", "regular", "lifestyle"}
-VALID_TOPICS: Set[str] = {"endo", "ortho", "surgery", "therapy", "materials", "lifestyle"}
+VALID_TOPICS: Set[str] = {"endo", "ortho", "surgery", "therapy", "materials", "lifestyle", "pharma"}
 
 
 def calculate_quiz_streaks(
@@ -119,9 +119,9 @@ def _resolve_db_path(db_path: Optional[str] = None) -> str:
         return db_path.strip()
     try:
         import config
-        return getattr(config, "DB_PATH", "stomat_bot.db")
+        return getattr(config, "DB_PATH", "endo_bot.db")
     except Exception:
-        return "stomat_bot.db"
+        return "endo_bot.db"
 
 
 _WAL_INITIALIZED = set()

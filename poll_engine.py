@@ -1808,7 +1808,7 @@ async def generate_poll(
     open_period: Optional[int] = None
 ) -> Tuple[PollPayload, types.InputMediaPoll]:
     """
-    Единая точка входа для генерации опроса или викторины в StomChat.
+    Единая точка входа для генерации опроса или викторины в EndoChat.
     """
     engine = PollEngine()
     return await engine.run_pipeline(

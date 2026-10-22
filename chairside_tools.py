@@ -1202,7 +1202,7 @@ async def dispatch_chairside_callback(bot_client, event, data_str: str) -> bool:
     # 0. Меню Chairside Hub
     if data_str in ("chairside:hub", "chairside:menu"):
         text = (
-            "🛠 <b>Клинические Chairside-инструменты StomChat</b>\n"
+            "🛠 <b>Клинические Chairside-инструменты EndoChat</b>\n"
             "━━━━━━━━━━━━━━━━━━━━━\n"
             "Мгновенный детерминированный lookup (<5 мс) доказательных протоколов у кресла:\n"
             "• Интерактивная формула FDI (11–48) с зонами опасности перфораций\n"
@@ -1944,7 +1944,8 @@ async def handle_pharma_command(bot_client, event, arg: str = ""):
     clean_arg = arg.strip().lower()
     import re
     if clean_arg:
-        num_match = re.search(r"\d+(\.\d+)?", clean_arg)
+        clean_norm = clean_arg.replace(',', '.')
+        num_match = re.search(r"\b\d{1,3}(?:\.\d{1,2})?\b", clean_norm)
         if num_match and not any(k in clean_arg for k in ["декса", "отек", "боль"]):
             weight = float(num_match.group(0))
             allergy = any(k in clean_arg for k in ["аллерги", "пенициллин"])
