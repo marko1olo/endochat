@@ -74,7 +74,23 @@ def _env_int(name, default):
         return default
 
 
-MY_ID = 7716348189
+def get_admin_user_ids() -> set:
+    """Возвращает актуальное множество ID администраторов из config/env."""
+    admins = set()
+    cfg_admins = getattr(config, "ADMIN_USER_IDS", None)
+    if cfg_admins:
+        admins.update(int(x) for x in cfg_admins if x)
+    env_admins = os.getenv("ADMIN_USER_IDS")
+    if env_admins:
+        for part in env_admins.split(","):
+            part = part.strip()
+            if part.isdigit() or (part.startswith("-") and part[1:].isdigit()):
+                admins.add(int(part))
+    if not admins:
+        admins.update({7716348189, 1890028643})
+    return admins
+
+MY_ID = getattr(config, "ADMIN_ID", _env_int("TG_MY_ID", _env_int("ADMIN_USER_ID", 7716348189)))
 
 # Числовой id бота как запасной вариант. Основной источник —
 # assistant.BOT_ID, но он появляется только после init_assistant: до этого
@@ -89,10 +105,10 @@ FALLBACK_BOT_ID = _env_int("ENDOCHAT_BOT_ID", _env_int("STOMCHAT_BOT_ID", 877553
 FALLBACK_BOT_USERNAME = (os.getenv("ENDOCHAT_BOT_USERNAME") or os.getenv("STOMCHAT_BOT_USERNAME") or "endohelp_bot").lstrip("@").lower()
 MIRROR_CHAT_ID = _env_int("MIRROR_CHAT_ID", 0) or None
 
-HEALTH_CHECK_INTERVAL_SECONDS = 300
-HEALTH_FAILURE_LIMIT = 3
-SCHEDULER_STATE_PATH = "bot_state.json"
-SUMMARY_STATUS_CHECK_SECONDS = 60
+HEALTH_CHECK_INTERVAL_SECONDS = _env_int("HEALTH_CHECK_INTERVAL_SECONDS", 300)
+HEALTH_FAILURE_LIMIT = _env_int("HEALTH_FAILURE_LIMIT", 3)
+SCHEDULER_STATE_PATH = os.getenv("SCHEDULER_STATE_PATH", "bot_state.json")
+SUMMARY_STATUS_CHECK_SECONDS = _env_int("SUMMARY_STATUS_CHECK_SECONDS", 60)
 # Терпение сторожа сводки обязано БЫТЬ БОЛЬШЕ самого долгого законного шага
 # конвейера, иначе сторож стреляет в живую работу.
 #
@@ -1374,9 +1390,9 @@ async def patched_send_message(*args, **kwargs):
                         if bot_text:
                             await database.save_message(
                                 msg_id=sent_msg.id,
-                                sender_id=getattr(config, "ENDOCHAT_BOT_ID", FALLBACK_BOT_ID) or getattr(sent_msg, 'sender_id', None) or 8775535374,
-                                sender_name=getattr(config, "ENDOCHAT_BOT_USERNAME", FALLBACK_BOT_USERNAME) or "EndoChat",
-                                sender_username=getattr(config, "ENDOCHAT_BOT_USERNAME", FALLBACK_BOT_USERNAME) or "endohelp_bot",
+                                sender_id=getattr(assistant, "BOT_ID", None) or getattr(config, "BOT_ID", None) or getattr(config, "ENDOCHAT_BOT_ID", None) or FALLBACK_BOT_ID or getattr(sent_msg, 'sender_id', None),
+                                sender_name=getattr(config, "BOT_DISPLAY_NAME", None) or getattr(config, "ENDOCHAT_BOT_USERNAME", FALLBACK_BOT_USERNAME) or "EndoChat",
+                                sender_username=(getattr(assistant, "BOT_USERNAME", None) or getattr(config, "BOT_USERNAME", None) or getattr(config, "ENDOCHAT_BOT_USERNAME", None) or FALLBACK_BOT_USERNAME).lstrip("@"),
                                 text=bot_text,
                                 date=getattr(sent_msg, 'date', None) or datetime.utcnow(),
                                 reply_to_msg_id=reply_to_id,
@@ -2748,7 +2764,7 @@ async def handle_new_message(event):
                 if cmd_lower in ("/wipe", "/delete", "/del") and reply_to_msg_id:
                     try:
                         is_super_admin = False
-                        if event.sender_id in (7716348189, 1890028643):
+                        if event.sender_id in get_admin_user_ids():
                             is_super_admin = True
                         else:
                             permissions = await event.client.get_permissions(event.chat_id, event.sender_id)
@@ -2821,7 +2837,7 @@ async def handle_new_message(event):
                 # Обычные врачи решают кейсы в ЛС бота: @endohelp_bot (/quiz), чтобы не спамить в чат сообщества.
                 if cmd_lower in ("/poll", "/кейс"):
                     is_admin_user = False
-                    if event.sender_id in (7716348189, 1890028643):
+                    if event.sender_id in get_admin_user_ids():
                         is_admin_user = True
                     else:
                         try:
@@ -2832,7 +2848,7 @@ async def handle_new_message(event):
                             is_admin_user = False
 
                     if not is_admin_user:
-                        uname = (getattr(assistant, "BOT_USERNAME", None) or os.getenv("ENDOCHAT_BOT_USERNAME") or "endohelp_bot").lstrip("@")
+                        uname = (getattr(assistant, "BOT_USERNAME", None) or getattr(config, "BOT_USERNAME", None) or FALLBACK_BOT_USERNAME).lstrip("@")
                         await bot_client.send_message(
                             entity=event.chat_id,
                             message=f"💡 Интерактивные клинические задачи и симулятор доступны в ЛС бота: @{uname} (команда /quiz).",
@@ -2948,7 +2964,7 @@ async def handle_new_message(event):
 
             # Standalone-реакция: ставится на интересные клинические сообщения коллег в общем потоке
             # Не запускаем, если сообщение адресовано боту (это зона ответственности ассистента)
-            bot_uname = (assistant.BOT_USERNAME or getattr(config, "ENDOCHAT_BOT_USERNAME", "") or "endohelp_bot").lower().lstrip("@")
+            bot_uname = (getattr(assistant, "BOT_USERNAME", None) or getattr(config, "BOT_USERNAME", None) or FALLBACK_BOT_USERNAME).lower().lstrip("@")
             clean_text_for_bot_chk = (text or "").lower()
             is_direct_bot_call = bool(
                 (bot_uname and f"@{bot_uname}" in clean_text_for_bot_chk)
@@ -3866,7 +3882,7 @@ async def sync_recent_messages(bot_client=None, max_lookback_hours: int = 24, ma
                 is_mention = True
             elif bot_username and f"@{bot_username}" in text_lower:
                 is_mention = True
-            elif any(f"@{h}" in text_lower for h in ("docendobot", "stomchat_bot", "stomat_bot", "endohelp_bot", "endochatbot", "endo_bot")):
+            elif any(f"@{h}" in text_lower for h in _get_bot_mention_names()):
                 is_mention = True
             elif text_lower.startswith("бот,") or text_lower.startswith("бот ") or text_lower == "бот":
                 is_mention = True
