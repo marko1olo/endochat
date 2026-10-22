@@ -47,6 +47,24 @@ except Exception:
     psutil = None
 
 PROCESSED_MSG_IDS = []
+_PROCESSED_KEYS_SET = set()
+
+
+def _mark_processed(chat_id, msg_id):
+    global PROCESSED_MSG_IDS
+    key = (chat_id, msg_id)
+    if key in _PROCESSED_KEYS_SET:
+        return False
+    _PROCESSED_KEYS_SET.add(key)
+    PROCESSED_MSG_IDS.append(key)
+    if len(PROCESSED_MSG_IDS) > 1000:
+        old = PROCESSED_MSG_IDS.pop(0)
+        _PROCESSED_KEYS_SET.discard(old)
+    return True
+
+
+def _is_processed(chat_id, msg_id):
+    return (chat_id, msg_id) in _PROCESSED_KEYS_SET or (chat_id, msg_id) in PROCESSED_MSG_IDS or msg_id in _PROCESSED_KEYS_SET
 
 
 def _env_int(name, default):
@@ -1132,6 +1150,13 @@ async def scheduler_task(bot_client):
                                     parse_mode='html'
                                 )
                             except Exception as send_err:
+                                exc_name = type(send_err).__name__
+                                if exc_name in ("ChannelPrivateError", "ChatAdminRequiredError", "ChatWriteForbiddenError", "UserBannedInChannelError"):
+                                    logger.warning(
+                                        "Terminal permission error %s sending debrief to %s, skipping retry.",
+                                        exc_name, tgt_chat
+                                    )
+                                    raise
                                 if res_reply_to != tgt_topic:
                                     logger.warning(
                                         "Reply к poll_msg_id=%s не удался (%s, возможно опрос удален). Отправка разбора в топик/чат %s...",
@@ -1293,13 +1318,42 @@ async def patched_send_message(*args, **kwargs):
         text = kwargs.get("message")
 
     has_file = bool(kwargs.get("file") or (len(args) > 2 and args[2]))
+    entity = args[0] if len(args) > 0 else kwargs.get("entity")
     if not has_file:
         if not text or not (str(text) if text is not None else "").strip():
-            entity = args[0] if len(args) > 0 else kwargs.get("entity")
             logger.warning(f"bot_client.send_message: aborted sending empty message to entity={entity}")
             return None
 
-    sent_msg = await original_send_message(*args, **kwargs)
+    # Защита от эскалации FloodWait: если чат на активном кулдауне, не стучимся в сеть Telegram
+    try:
+        import tg_safety
+        cd = tg_safety.default_cooldown()
+        rem = cd.remaining(entity)
+        if rem > 0:
+            logger.warning(
+                "bot_client.send_message: chat %s is under flood cooldown (%.1fs remaining). "
+                "Aborting send to avoid penalty escalation.", entity, rem
+            )
+            return None
+    except Exception:
+        pass
+
+    try:
+        sent_msg = await original_send_message(*args, **kwargs)
+    except Exception as exc:
+        try:
+            from telethon.errors import FloodWaitError
+            if isinstance(exc, FloodWaitError):
+                wait_sec = getattr(exc, "seconds", 60) or 60
+                import tg_safety
+                tg_safety.default_cooldown().block(entity, wait_sec)
+                logger.warning(
+                    "bot_client.send_message: caught FloodWaitError %ds on entity=%s. Registered in tg_safety cooldown.",
+                    wait_sec, entity
+                )
+        except Exception:
+            pass
+        raise
     if sent_msg and hasattr(sent_msg, 'id') and hasattr(sent_msg, 'peer_id'):
         try:
             # Пересчёт peer -> chat_id отдаём самой библиотеке. Ручная
@@ -2401,14 +2455,10 @@ async def handle_new_message(event):
         msg_id = event.message.id
         chat_id = event.chat_id
 
-        global PROCESSED_MSG_IDS
-        key = (chat_id, msg_id)
-        if key in PROCESSED_MSG_IDS or msg_id in PROCESSED_MSG_IDS:
+        if _is_processed(chat_id, msg_id):
             logger.info(f"Deduplicator: Skipping already processed chat_id={chat_id} msg_id={msg_id}")
             return
-        PROCESSED_MSG_IDS.append(key)
-        if len(PROCESSED_MSG_IDS) > 1000:
-            PROCESSED_MSG_IDS.pop(0)
+        _mark_processed(chat_id, msg_id)
 
         # Пересылка в зеркало в реальном времени (не блокирует основной поток)
         if MIRROR_CHAT_ID and chat_id == config.SOURCE_CHAT_ID:
@@ -2899,10 +2949,11 @@ async def handle_new_message(event):
             # Standalone-реакция: ставится на интересные клинические сообщения коллег в общем потоке
             # Не запускаем, если сообщение адресовано боту (это зона ответственности ассистента)
             bot_uname = (assistant.BOT_USERNAME or getattr(config, "ENDOCHAT_BOT_USERNAME", "") or "endohelp_bot").lower().lstrip("@")
+            clean_text_for_bot_chk = (text or "").lower()
             is_direct_bot_call = bool(
-                (bot_uname and f"@{bot_uname}" in text.lower())
-                or (bot_uname and bot_uname in text.lower())
-                or "бот" in text.lower()
+                (bot_uname and f"@{bot_uname}" in clean_text_for_bot_chk)
+                or (bot_uname and bot_uname in clean_text_for_bot_chk)
+                or "бот" in clean_text_for_bot_chk
             )
             is_cmd = bool(text and text.strip().startswith("/"))
             if event.chat_id == config.SOURCE_CHAT_ID and not is_direct_bot_call and not is_cmd:
@@ -3842,12 +3893,7 @@ async def sync_recent_messages(bot_client=None, max_lookback_hours: int = 24, ma
                 continue
 
             assistant.REPLIED_MSG_IDS[msg_id] = True
-            global PROCESSED_MSG_IDS
-            key = (config.SOURCE_CHAT_ID, msg_id)
-            if key not in PROCESSED_MSG_IDS and msg_id not in PROCESSED_MSG_IDS:
-                PROCESSED_MSG_IDS.append(key)
-                if len(PROCESSED_MSG_IDS) > 1000:
-                    PROCESSED_MSG_IDS.pop(0)
+            _mark_processed(config.SOURCE_CHAT_ID, msg_id)
 
             adapter_event = TelethonEventAdapter(tg_msg)
             replied_ok = False
