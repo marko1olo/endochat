@@ -27,15 +27,18 @@ for _stream in (sys.stdout, sys.stderr):
     except Exception:
         pass
 
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
 _TMPDIR = tempfile.mkdtemp(prefix="stomchat_boot_")
 os.environ["STOMCHAT_LOG_PATH"] = os.path.join(_TMPDIR, "boot.log")
 
 import config  # noqa: E402
 
 for _ext in ("", "-wal", "-shm"):
-    for _db in ("stomat_bot.db", getattr(config, "DB_PATH", "endo_bot.db")):
-        if os.path.exists(_db + _ext):
-            shutil.copy2(_db + _ext, os.path.join(_TMPDIR, "boot.db" + _ext))
+    if os.path.exists("stomat_bot.db" + _ext):
+        shutil.copy2("stomat_bot.db" + _ext, os.path.join(_TMPDIR, "boot.db" + _ext))
 config.DB_PATH = os.path.join(_TMPDIR, "boot.db")
 
 import runtime_guard  # noqa: E402
