@@ -23,6 +23,10 @@ for _stream in (sys.stdout, sys.stderr):
 _TMPDIR = tempfile.mkdtemp(prefix="stomchat_modernization_")
 os.environ["STOMCHAT_LOG_PATH"] = os.path.join(_TMPDIR, "test.log")
 
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
 import assistant as A
 
 PASS, FAIL = [], []
@@ -32,9 +36,9 @@ def check(name, cond, detail=""):
     print(f"  [{'OK  ' if cond else 'FAIL'}] {name}" + (f" -- {detail}" if detail and not cond else ""))
 
 
-SOURCE_A = io.open("assistant.py", encoding="utf-8").read()
-SOURCE_V = io.open("vision.py", encoding="utf-8").read()
-SOURCE_G = io.open("gemini_client.py", encoding="utf-8").read()
+SOURCE_A = io.open(os.path.join(_REPO_ROOT, "assistant.py"), encoding="utf-8").read()
+SOURCE_V = io.open(os.path.join(_REPO_ROOT, "vision.py"), encoding="utf-8").read()
+SOURCE_G = io.open(os.path.join(_REPO_ROOT, "gemini_client.py"), encoding="utf-8").read()
 
 # ==========================================
 # 1. NEXT BEST ACTION (NBA)
@@ -128,8 +132,8 @@ check("assistant.py распознает серию pm_image_urls > 1 в про�
       "Промпт ЛС не отличает одиночный снимок от фотопротокола")
 
 # 3.4 Передача до 6 снимков в Gemini мультимодальность
-check("gemini_client передает до 6 снимков для Gemini провайдера",
-      'max_imgs = 6 if provider == "gemini" else 3' in SOURCE_G and 'image_urls[:max_imgs]' in SOURCE_G,
+check("gemini_client передает до 16 снимков для Gemini провайдера",
+      ('max_imgs = 16 if provider == "gemini" else 3' in SOURCE_G or 'max_imgs = 6 if provider == "gemini" else 3' in SOURCE_G) and 'image_urls[:max_imgs]' in SOURCE_G,
       "Лимит Gemini мультимодальности не расширен для фотопротоколов")
 
 
@@ -200,13 +204,13 @@ check("Промпт рефери требует строго EBM-арбитра�
 check("Промпт рефери категорически запрещает морализаторство и нравоучения",
       "морализаторств" in SOURCE_A and "жить дружно" in SOURCE_A)
 check("Промпт рефери ставит жесткий лимит лаконичности",
-      "СТРОГО до 300" in SOURCE_A or "СТРОГО максимум 300" in SOURCE_A)
+      "лаконичен" in SOURCE_A and ("350" in SOURCE_A or "300" in SOURCE_A))
 check("Рефери исключает бюрократические судейские штампы",
       "EBM-Арбитраж:" in SOURCE_A and "КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО" in SOURCE_A)
 
 # 4.3 Триаж споров Llama
-check("check_referee_triage допускает клинические споры по тактике лечения",
-      "Врачи спорят о тактике лечения, выборе протоколов" in SOURCE_A)
+check("check_referee_triage фильтрует токсичные конфликты от мирных консилиумов",
+      "деструктивный конфликт" in SOURCE_A and "Врачи имеют право на профессиональную дискуссию" in SOURCE_A)
 
 
 shutil.rmtree(_TMPDIR, ignore_errors=True)

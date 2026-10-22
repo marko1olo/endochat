@@ -373,6 +373,12 @@ class QuestionLifelineManager:
         if media_desc and is_explicitly_non_dental_media(media_desc):
             logger.info("🛑 Lifeline отменен для msg_id=%s: обнаружено не-клиническое изображение (%s)",
                         pq.msg_id, media_desc[:80])
+            try:
+                import clinical_rescue
+                import config
+                clinical_rescue.mark_case_and_album_rescued(config.DB_PATH, pq.msg_id, pq.chat_id, sender_id=pq.sender_id)
+            except Exception:
+                pass
             return
 
         logger.info("🚨 Срабатывание Lifeline («Первый ответ») для вопроса msg_id=%s от %s", pq.msg_id, pq.sender_name)
@@ -413,6 +419,12 @@ class QuestionLifelineManager:
 
         if not response_text:
             logger.warning("Lifeline generation returned empty text for msg_id=%s", pq.msg_id)
+            try:
+                import clinical_rescue
+                import config
+                clinical_rescue.mark_case_and_album_rescued(config.DB_PATH, pq.msg_id, pq.chat_id, sender_id=pq.sender_id)
+            except Exception:
+                pass
             return
 
         # Запоминаем отправку

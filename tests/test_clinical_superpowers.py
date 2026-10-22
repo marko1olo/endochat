@@ -38,8 +38,12 @@ for _stream in (sys.stdout, sys.stderr):
     except Exception:
         pass
 
-_TMPDIR = tempfile.mkdtemp(prefix="stomchat_superpowers_")
-os.environ["STOMCHAT_LOG_PATH"] = os.path.join(_TMPDIR, "t.log")
+_TMPDIR = tempfile.mkdtemp(prefix="endochat_superpowers_")
+os.environ["ENDOCHAT_LOG_PATH"] = os.path.join(_TMPDIR, "t.log")
+
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
 
 import config
 config.DB_PATH = os.path.join(_TMPDIR, "test_superpowers.db")

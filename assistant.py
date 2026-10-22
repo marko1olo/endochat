@@ -187,7 +187,7 @@ _REACTION_FLOOD_UNTIL: float = 0.0
 # - глобальный слот-пул: макс 8 реакций в час по всему чату
 # - per-sender кулдаун: 5 мин (не заваливаем одного врача)
 _STANDALONE_REACTION_SLOTS = TTLCache(maxsize=30, ttl=3600)
-_STANDALONE_SENDER_CD = TTLCache(maxsize=5000, ttl=30)
+_STANDALONE_SENDER_CD = TTLCache(maxsize=5000, ttl=300)
 
 # Бюджет доставки готовой сводки. Без него сгенерированная (и уже оплаченная)
 # сводка не уходит НИКОМУ: клиент настроен как timeout=30, request_retries=10,
@@ -2145,8 +2145,12 @@ def save_state(state):
     Содержимое гарантированно защищено от порчи (0 байт) при SIGKILL, OOM и авариях питания.
     """
     tmp_file_path = None
+    acquired = _STATE_FILE_LOCK.acquire(timeout=10.0)
+    if not acquired:
+        logger.error("save_state: failed to acquire _STATE_FILE_LOCK after 10s timeout, skipping disk write to prevent deadlock")
+        return
     try:
-        with _STATE_FILE_LOCK:
+        try:
             on_disk = _read_state_file(STATE_PATH)
             if on_disk is None:
                 on_disk = _read_state_file(STATE_BAK_PATH) or {}
@@ -2199,19 +2203,21 @@ def save_state(state):
             # Атомарная замена в пределах тома (на Windows MoveFileExW с MOVEFILE_REPLACE_EXISTING)
             os.replace(tmp_file_path, STATE_PATH)
             tmp_file_path = None
-    except Exception as e:
-        logger.error(f"Error saving assistant state: {e}")
+        except Exception as e:
+            logger.error(f"Error saving assistant state: {e}")
+        finally:
+            if tmp_file_path and os.path.exists(tmp_file_path):
+                try:
+                    os.remove(tmp_file_path)
+                except Exception:
+                    pass
+            if os.path.exists(STATE_TMP_PATH):
+                try:
+                    os.remove(STATE_TMP_PATH)
+                except Exception:
+                    pass
     finally:
-        if tmp_file_path and os.path.exists(tmp_file_path):
-            try:
-                os.remove(tmp_file_path)
-            except Exception:
-                pass
-        if os.path.exists(STATE_TMP_PATH):
-            try:
-                os.remove(STATE_TMP_PATH)
-            except Exception:
-                pass
+        _STATE_FILE_LOCK.release()
 
 def _parse_state_dt(value, default=datetime(2000, 1, 1)):
     """Разбирает ISO-таймстамп из состояния. Битое значение = 'никогда', без исключения."""
@@ -5293,14 +5299,14 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
             chain, _, _ = await fetch_dynamic_chat_context(
                 msg_id, reply_to_msg_id, base_limit=12, max_limit=40, event=event
             )
-            context_msgs = chain
+            context_msgs = chain or [f"{sender_first_name or 'Коллега'}: {text}"]
         else:
             # 0.1. Категорически игнорируем реплики, явно адресованные другим участникам или админам (@username)
             all_mentions = re.findall(r"@([a-zA-Z0-9_]{3,})", text or "")
             other_mentions = [m.lower() for m in all_mentions if m.lower() not in known_bot_handles]
             if other_mentions:
                 logger.info("Message %s explicitly addresses other user(s) (%s). Suppressing assistant.", msg_id, other_mentions)
-                return False or [f"{sender_first_name or 'Коллега'}: {text}"]
+                return False
 
         # 1. Check Dialogue Reaction or Thread Continuation with Bot
         known_bots = get_known_bot_ids()
@@ -7060,7 +7066,7 @@ TERM_EXPLAINER_MAX_CHARS = 120
 # Скачивание медиа в ЛС. Собственного таймаута у download_media нет, а
 # обработчик держит замок на пользователя: без предела все следующие
 # сообщения врача встают в очередь за подвисшей загрузкой.
-PM_MEDIA_DOWNLOAD_TIMEOUT_SECONDS = 120
+PM_MEDIA_DOWNLOAD_TIMEOUT_SECONDS = int(os.getenv("ENDOCHAT_PM_MEDIA_DOWNLOAD_TIMEOUT_SECONDS", "35"))
 
 # Область команды /итог. Без ответа на сообщение берём последние реплики; в
 # ответ на конкретное — ветку от него, потолок нужен, чтобы указание на
@@ -9865,7 +9871,7 @@ async def handle_interactive_case_step(bot_client, chat_id, user_text, user_stat
             [Button.inline("🚀 Новый кейс", data="case:start"), Button.inline("🎲 Клинический квиз", data="quiz:generate")],
             [Button.inline("⬅️ Назад в меню", data="nav:main")]
         ]
-        await bot_client.send_message(entity=chat_id, message=final_message, buttons=finish_buttons, parse_mode='html')
+        await send_message_chunks_async(bot_client, chat_id, final_message, buttons=finish_buttons, parse_mode='html')
     else:
         # Update history and save state
         history_data.append({"role": "assistant", "content": reply_text})
@@ -9885,7 +9891,7 @@ async def handle_interactive_case_step(bot_client, chat_id, user_text, user_stat
             [Button.inline("🔘 Вариант C", data="case:opt:C"), Button.inline("🔘 Вариант D", data="case:opt:D")],
             [Button.inline("⏹️ Завершить симулятор", data="case:abort")]
         ]
-        await bot_client.send_message(entity=chat_id, message=reply_text, buttons=step_buttons, parse_mode='html')
+        await send_message_chunks_async(bot_client, chat_id, reply_text, buttons=step_buttons, parse_mode='html')
 
     # Реплика экзаменатора уходит и в историю ЛС, а не только в state кейса.
     #
@@ -10110,22 +10116,7 @@ async def handle_private_message_bundle(bot_client, events_burst):
         except Exception as ve:
             logger.warning("Error transcribing voice in PM bundle: %s", ve)
         finally:
-            if temp_p and os.path.exists(temp_p):
-                try:
-                    os.remove(temp_p)
-                except Exception:
-                    pass
-            prefix = f"bundle_v_{vev.message.id}_"
-            try:
-                if os.path.exists(media_tools.MEDIA_TEMP_DIR):
-                    for fname in os.listdir(media_tools.MEDIA_TEMP_DIR):
-                        if fname.startswith(prefix):
-                            try:
-                                os.remove(os.path.join(media_tools.MEDIA_TEMP_DIR, fname))
-                            except Exception:
-                                pass
-            except Exception:
-                pass
+            media_tools.cleanup_temp_files(temp_p, f"bundle_v_{vev.message.id}_")
 
     combined_elements = []
     if text_parts:
@@ -10141,6 +10132,8 @@ async def handle_private_message_bundle(bot_client, events_burst):
     if unified_text:
         target_event.message.message = unified_text
 
+    # Сбрасываем таймер кулдауна: пакет сообщений уже прошел debouncing в очереди
+    USER_COOLDOWNS[(chat_id, chat_id, "pm_chat")] = datetime.now() - timedelta(seconds=10)
     await handle_private_message(bot_client, target_event)
 
 def detect_pm_emergency(text: str) -> Optional[str]:
@@ -10327,6 +10320,94 @@ def sanitize_clinical_pm_output(reply_text: str) -> str:
     return text
 
 
+TEXT_MENU_COMMAND_MAP = {
+    # Постоянная нижняя панель быстрого доступа (ReplyKeyboardMarkup)
+    "🛠 chairside инструменты": "/chairside",
+    "chairside инструменты": "/chairside",
+    "🛠 chairside": "/chairside",
+    "🪑 chairside": "/chairside",
+    "chairside": "/chairside",
+    "у кресла": "/chairside",
+    "🦷 зубная формула fdi": "/fdi",
+    "зубная формула fdi": "/fdi",
+    "зубная формула": "/fdi",
+    "формула fdi": "/fdi",
+    "fdi": "/fdi",
+    "📐 сложность aae": "/aae",
+    "сложность aae": "/aae",
+    "aae": "/aae",
+
+    "💊 препараты и дозы": "/calc",
+    "препараты и дозы": "/calc",
+    "💊 препараты": "/calc",
+    "препараты": "/calc",
+    "дозы препаратов": "/calc",
+    "дозы": "/calc",
+    "дозировки": "/calc",
+    "🧮 калькулятор": "/calc",
+    "калькулятор": "/calc",
+    "калькулятор анестезии": "/calc",
+    "расчет анестезии": "/calc",
+    "расчёт анестезии": "/calc",
+
+    "🔍 найти статью": "/web",
+    "найти статью": "/web",
+    "🔍 найти": "/web",
+    "найти статьи": "/web",
+    "🔍 поиск в сети": "/web",
+    "поиск в сети": "/web",
+    "web-поиск": "/web",
+    "🌐 поиск в сети": "/web",
+    "🔍 поиск": "/web",
+    "поиск": "/web",
+    "найти": "/web",
+
+    "⭐ закладки": "/bookmarks",
+    "мои закладки": "/bookmarks",
+    "закладки": "/bookmarks",
+    "сохраненки": "/bookmarks",
+    "сохранёнки": "/bookmarks",
+
+    "⌨️ меню": "/menu",
+    "меню": "/menu",
+    "⌨️ главное меню": "/menu",
+    "главное меню": "/menu",
+    "кнопка меню": "/menu",
+    "навигация": "/menu",
+
+    # Протоколы и база знаний
+    "📚 клинические протоколы": "/protocols",
+    "клинические протоколы": "/protocols",
+    "📚 протоколы": "/protocols",
+    "протоколы": "/protocols",
+    "📖 база знаний": "/wiki",
+    "база знаний": "/wiki",
+    "📖 энциклопедия": "/wiki",
+    "энциклопедия": "/wiki",
+
+    # Квизы, симуляторы и кейсы
+    "🎲 квиз": "/quiz",
+    "квиз": "/quiz",
+    "🎲 викторина": "/quiz",
+    "викторина": "/quiz",
+    "🎮 клинический кейс": "/case",
+    "клинический кейс": "/case",
+    "симулятор": "/case",
+    "симулятор кейсов": "/case",
+
+    # Профиль, статистика, стиль
+    "👤 мой профиль": "/profile",
+    "мой профиль": "/profile",
+    "профиль": "/profile",
+    "📊 статистика чата": "/stats",
+    "статистика чата": "/stats",
+    "статистика": "/stats",
+    "⚙️ стиль общения": "/style",
+    "стиль общения": "/style",
+    "стиль": "/style",
+}
+
+
 async def handle_private_message(bot_client, event):
     """Глубокий обработчик входящих личных сообщений (ЛС) бота с RAG, зрением и памятью."""
     try:
@@ -10336,41 +10417,39 @@ async def handle_private_message(bot_client, event):
         # Обновляем ID активного запроса для инвалидации устаревших фоновых задач дополнения
         _ACTIVE_PM_REQUESTS[chat_id] = time.time()
 
-        # Rate limit: PM requests allowed once per 5 seconds per user (allow commands through)
+        # 0. Мгновенное распознавание текстовых кнопок меню ДО rate limit (Zero Delay Navigation)
+        mapped_cmd = TEXT_MENU_COMMAND_MAP.get(text.lower())
+        if mapped_cmd:
+            text = mapped_cmd
+
+        # Rate limit & pacing: PM requests throttled safely (FIFO queue pacing, never drop messages)
         is_command = text.lower().startswith("/")
         if not is_command:
             cooldown_secs = check_user_cooldown(chat_id, chat_id, "pm_chat", seconds=5)
             if cooldown_secs > 0:
-                logger.info(f"PM rate limit for chat_id={chat_id}, cooldown={cooldown_secs}s")
-                # Обрабатывать не будем, но в историю положим. Раньше здесь
-                # стоял голый return ДО save_pm_message, и врачи, пишущие
-                # мыслями в несколько сообщений подряд ("смотри, случай:" →
-                # через две секунды "37-й, боль при накусывании, что делать?"),
-                # теряли второе НАВСЕГДА: оно не попадало ни в текущий промпт,
-                # ни в контекст следующих ходов. Бот отвечал на обрывок, а сам
-                # вопрос исчезал без следа.
+                logger.info(f"PM rate limit pacing for chat_id={chat_id}, waiting={cooldown_secs}s")
                 if text:
                     try:
                         await database.save_pm_message(chat_id, "User", text)
                     except Exception as save_err:
-                        logger.error(f"Failed to persist rate-limited PM message: {save_err}")
+                        logger.error(f"Failed to persist PM message: {save_err}")
 
-                # И говорим об этом вслух. Раньше сообщение просто исчезало:
-                # врач ждал ответа, которого никогда не будет, и не мог понять,
-                # дошёл ли вопрос. Предупреждение само под кулдауном, чтобы
-                # серия из пяти сообщений не превратилась в пять уведомлений.
-                if not check_user_cooldown(chat_id, chat_id, "pm_rate_notice", seconds=30):
+                # Мягкий статус, если задержка заметна (>= 2с) и недавно не уведомляли
+                if cooldown_secs >= 2 and not check_user_cooldown(chat_id, chat_id, "pm_rate_notice", seconds=15):
                     try:
-                        await bot_client.send_message(
-                            entity=chat_id,
-                            message=f"⏳ <i>Секунду — дочитываю предыдущее сообщение. "
-                                    f"Задайте вопрос одним сообщением через {cooldown_secs} с, "
-                                    f"я учту всё написанное.</i>",
+                        await tg_safety.send_message(
+                            bot_client,
+                            chat_id,
+                            "⏳ <i>Секунду — обрабатываю ваш запрос...</i>",
+                            timeout=10.0,
                             parse_mode='html',
                         )
                     except Exception as notice_err:
-                        logger.error(f"Failed to send PM rate notice: {notice_err}")
-                return
+                        logger.debug(f"Failed to send PM rate notice: {notice_err}")
+
+                # Ждем остаток кулдауна вместо выбрасывания вопроса врача в помойку
+                await asyncio.sleep(min(cooldown_secs, 5))
+                USER_COOLDOWNS[(chat_id, chat_id, "pm_chat")] = datetime.now()
 
         # Record user activity for DM proactive pings
         try:
@@ -10398,103 +10477,15 @@ async def handle_private_message(bot_client, event):
         if text and is_negative_feedback(text):
             try:
                 set_ping_opt_out(chat_id, text)
-                await bot_client.send_message(
-                    entity=chat_id,
-                    message="Понял, сам писать больше не буду. Вопросы задавайте когда угодно — на них отвечаю всегда.",
+                await tg_safety.send_message(
+                    bot_client,
+                    chat_id,
+                    "Понял, сам писать больше не буду. Вопросы задавайте когда угодно — на них отвечаю всегда.",
+                    timeout=10.0,
                 )
             except Exception as opt_err:
                 logger.error(f"Failed to process ping opt-out for {chat_id}: {opt_err}")
             return
-
-        # Map text menu button clicks to slash commands
-        btn_mapping = {
-            # Постоянная нижняя панель быстрого доступа (ReplyKeyboardMarkup)
-            "🛠 chairside инструменты": "/chairside",
-            "chairside инструменты": "/chairside",
-            "🛠 chairside": "/chairside",
-            "🪑 chairside": "/chairside",
-            "chairside": "/chairside",
-            "у кресла": "/chairside",
-            "🦷 зубная формула fdi": "/fdi",
-            "зубная формула fdi": "/fdi",
-            "зубная формула": "/fdi",
-            "формула fdi": "/fdi",
-            "fdi": "/fdi",
-            "📐 сложность aae": "/aae",
-            "сложность aae": "/aae",
-            "aae": "/aae",
-
-            "💊 препараты и дозы": "/calc",
-            "препараты и дозы": "/calc",
-            "💊 препараты": "/calc",
-            "препараты": "/calc",
-            "дозы препаратов": "/calc",
-            "дозы": "/calc",
-            "дозировки": "/calc",
-            "🧮 калькулятор": "/calc",
-            "калькулятор": "/calc",
-            "калькулятор анестезии": "/calc",
-            "расчет анестезии": "/calc",
-            "расчёт анестезии": "/calc",
-
-            "🔍 найти статью": "/web",
-            "найти статью": "/web",
-            "🔍 найти": "/web",
-            "найти статьи": "/web",
-            "🔍 поиск в сети": "/web",
-            "поиск в сети": "/web",
-            "web-поиск": "/web",
-            "🌐 поиск в сети": "/web",
-            "🔍 поиск": "/web",
-            "поиск": "/web",
-            "найти": "/web",
-
-            "⭐ закладки": "/bookmarks",
-            "мои закладки": "/bookmarks",
-            "закладки": "/bookmarks",
-            "сохраненки": "/bookmarks",
-            "сохранёнки": "/bookmarks",
-
-            "⌨️ меню": "/menu",
-            "меню": "/menu",
-            "⌨️ главное меню": "/menu",
-            "главное меню": "/menu",
-            "кнопка меню": "/menu",
-            "навигация": "/menu",
-
-            # Протоколы и база знаний
-            "📚 клинические протоколы": "/protocols",
-            "клинические протоколы": "/protocols",
-            "📚 протоколы": "/protocols",
-            "протоколы": "/protocols",
-            "📖 база знаний": "/wiki",
-            "база знаний": "/wiki",
-            "📖 энциклопедия": "/wiki",
-            "энциклопедия": "/wiki",
-
-            # Квизы, симуляторы и кейсы
-            "🎲 квиз": "/quiz",
-            "квиз": "/quiz",
-            "🎲 викторина": "/quiz",
-            "викторина": "/quiz",
-            "🎮 клинический кейс": "/case",
-            "клинический кейс": "/case",
-            "симулятор": "/case",
-            "симулятор кейсов": "/case",
-
-            # Профиль, статистика, стиль
-            "👤 мой профиль": "/profile",
-            "мой профиль": "/profile",
-            "профиль": "/profile",
-            "📊 статистика чата": "/stats",
-            "статистика чата": "/stats",
-            "статистика": "/stats",
-            "⚙️ стиль общения": "/style",
-            "стиль общения": "/style",
-            "стиль": "/style",
-        }
-        if text.lower() in btn_mapping:
-            text = btn_mapping[text.lower()]
 
         # Pre-LLM adversarial filter against jailbreaks & controlled substances
         is_adv, adv_refusal = check_adversarial_input(text)
@@ -10618,22 +10609,7 @@ async def handle_private_message(bot_client, event):
                         await bot_client.delete_messages(chat_id, status_msg.id)
                     except Exception as exc:
                         logger.debug("Failed to delete voice status_msg in chat %s: %s", chat_id, exc)
-                if temp_path and os.path.exists(temp_path):
-                    try:
-                        os.remove(temp_path)
-                    except Exception:
-                        pass
-                prefix = f"{event.message.id}_"
-                try:
-                    if os.path.exists(media_tools.MEDIA_TEMP_DIR):
-                        for fname in os.listdir(media_tools.MEDIA_TEMP_DIR):
-                            if fname.startswith(prefix):
-                                try:
-                                    os.remove(os.path.join(media_tools.MEDIA_TEMP_DIR, fname))
-                                except Exception:
-                                    pass
-                except Exception:
-                    pass
+                media_tools.cleanup_temp_files(temp_path, f"{event.message.id}_")
 
             if transcribed_text:
                 text = transcribed_text
@@ -10854,11 +10830,7 @@ async def handle_private_message(bot_client, event):
                             await bot_client.delete_messages(chat_id, status_msg.id)
                         except Exception as exc:
                             logger.debug("Failed to delete case media status_msg in chat %s: %s", chat_id, exc)
-                    if temp_case_media and os.path.exists(temp_case_media):
-                        try:
-                            os.remove(temp_case_media)
-                        except Exception:
-                            pass
+                    media_tools.cleanup_temp_files(temp_case_media, f"case_{event.message.id}_")
 
                 if case_media_desc:
                     photo_note = f"[Врач предоставил снимок/рентген]: {case_media_desc}"
@@ -11407,7 +11379,7 @@ async def handle_private_message(bot_client, event):
                         f"<i>Напишите ваш вариант ответа (например, «Мой ответ A»), чтобы я проверил его и предоставил клинический разбор!</i>"
                     )
 
-                await bot_client.send_message(entity=chat_id, message=f"🎲 <b>Клиническая Викторина:</b>\n\n{reply_text}", parse_mode='html')
+                await send_message_chunks_async(bot_client, chat_id, f"🎲 <b>Клиническая Викторина:</b>\n\n{reply_text}", parse_mode='html')
                 # Вопрос ОБЯЗАН попасть в историю ЛС. Без этого следующий ход
                 # врача ("Мой ответ Б") приходит в общий обработчик без самой
                 # задачи, и модель уверенно выносит "верно/неверно" с разбором
@@ -12277,14 +12249,12 @@ async def handle_private_message(bot_client, event):
                         chat_id, notified.reason,
                     )
             finally:
-                for path in temp_paths_to_clean:
-                    if not path:
-                        continue
-                    try:
-                        if os.path.exists(path):
-                            os.remove(path)
-                    except OSError as cleanup_err:
-                        logger.warning("PM temp cleanup failed path=%s: %s", path, cleanup_err)
+                _pm_prefixes = [
+                    f"pm_{getattr(a_ev.message, 'id', '')}_"
+                    for a_ev in album_events
+                    if getattr(getattr(a_ev, "message", None), "id", None)
+                ]
+                media_tools.cleanup_temp_files(temp_paths_to_clean, _pm_prefixes)
 
         # Анализ снимка мог не состояться: упало скачивание, не извлёкся кадр,
         # vision вернул пусто. Раньше здесь не было ни return, ни отметки об
@@ -14766,38 +14736,82 @@ async def query_random_wiki_fact():
 
 async def edit_callback_message(bot_client, event, text, op, **kwargs):
     """
-    Правка сообщения по нажатию инлайн-кнопки — обязательно под сроком.
+    Безопасная правка сообщения по нажатию инлайн-кнопки с защитой от MessageTooLongError (> 4000 символов).
 
     Спиннер на кнопке снимает event.answer(), а он стоит строкой НИЖЕ правки.
-    Пока правка была без границы, зависший Telegram означал: врач смотрит на
-    крутящуюся кнопку до 500 с (timeout=30 x request_retries=10, main.py:900-910),
-    решает, что бот считает, и жмёт снова. Страховка в main.py:2315 тут не
-    помогает: она ловит исключение, а зависание не исключение — await просто не
-    возвращается, и finally не наступает.
+    Если текст длинный (> 4000 символов), аккуратно режет его на сбалансированные HTML-чанки:
+    - первый чанк редактирует существующее сообщение;
+    - оставшиеся чанки досылаются новыми сообщениями;
+    - кнопки (buttons) прикрепляются к финальному чанку.
 
-    Исключение наружу не летит (tg_safety отдаёт TgOutcome), поэтому
-    event.answer() после вызова выполняется в любом случае и кнопка гаснет.
+    Если редактирование завершилось ошибкой или таймаутом, надежно доставляет ответ новым сообщением.
     """
-    chat_id = getattr(event, 'chat_id', None)
+    chat_id = getattr(event, 'chat_id', None) or getattr(event, 'sender_id', None)
     message_id = getattr(event, 'message_id', None)
-    if bot_client and chat_id is not None and message_id is not None:
-        outcome = await tg_safety.edit_message(
-            bot_client, chat_id, message_id, text,
-            timeout=CALLBACK_EDIT_TIMEOUT_SECONDS, op=op, logger=logger, **kwargs,
-        )
-        if getattr(outcome, 'ok', False):
-            return outcome
-    if hasattr(event, 'edit') and callable(getattr(event, 'edit', None)):
-        try:
-            return await asyncio.wait_for(event.edit(text, **kwargs), timeout=CALLBACK_EDIT_TIMEOUT_SECONDS)
-        except TypeError:
+    buttons = kwargs.pop("buttons", None)
+
+    chunks = list(html_safe.split_html(text, limit=TELEGRAM_MESSAGE_LIMIT))
+    if not chunks:
+        chunks = [text]
+
+    # Сценарий 1: Текст помещается в одно сообщение
+    if len(chunks) == 1:
+        single_chunk = chunks[0]
+        if bot_client and chat_id is not None and message_id is not None:
+            outcome = await tg_safety.edit_message(
+                bot_client, chat_id, message_id, single_chunk,
+                timeout=CALLBACK_EDIT_TIMEOUT_SECONDS, op=op, logger=logger, buttons=buttons, **kwargs,
+            )
+            if getattr(outcome, 'ok', False):
+                return outcome
+        if hasattr(event, 'edit') and callable(getattr(event, 'edit', None)):
             try:
-                return await asyncio.wait_for(event.edit(text), timeout=CALLBACK_EDIT_TIMEOUT_SECONDS)
+                return await asyncio.wait_for(event.edit(single_chunk, buttons=buttons, **kwargs), timeout=CALLBACK_EDIT_TIMEOUT_SECONDS)
+            except TypeError:
+                try:
+                    return await asyncio.wait_for(event.edit(single_chunk), timeout=CALLBACK_EDIT_TIMEOUT_SECONDS)
+                except Exception as exc:
+                    logger.debug("event.edit fallback without kwargs failed: %s", exc)
             except Exception as exc:
-                logger.debug("event.edit fallback without kwargs failed: %s", exc)
+                logger.debug("event.edit with kwargs failed: %s", exc)
+
+        # Fallback при сбое правки — доставка через send_message_chunks_async
+        if bot_client and chat_id is not None:
+            logger.info("edit_callback_message: edit failed for op=%s, falling back to send_message_chunks_async", op)
+            return await send_message_chunks_async(bot_client, chat_id, single_chunk, buttons=buttons, **kwargs)
+        return None
+
+    # Сценарий 2: Длинный ответ (> 4000 символов, несколько чанков)
+    logger.info("edit_callback_message: split long text into %d chunks for chat_id=%s op=%s", len(chunks), chat_id, op)
+    edit_success = False
+    if bot_client and chat_id is not None and message_id is not None:
+        first_outcome = await tg_safety.edit_message(
+            bot_client, chat_id, message_id, chunks[0],
+            timeout=CALLBACK_EDIT_TIMEOUT_SECONDS, op=f"{op}:chunk_0", logger=logger, buttons=None, **kwargs,
+        )
+        if getattr(first_outcome, 'ok', False):
+            edit_success = True
+
+    if not edit_success and hasattr(event, 'edit') and callable(getattr(event, 'edit', None)):
+        try:
+            await asyncio.wait_for(event.edit(chunks[0], buttons=None, **kwargs), timeout=CALLBACK_EDIT_TIMEOUT_SECONDS)
+            edit_success = True
         except Exception as exc:
-            logger.debug("event.edit with kwargs failed: %s", exc)
-    return None
+            logger.debug("event.edit for first chunk failed: %s", exc)
+
+    if edit_success:
+        last_outcome = None
+        for idx in range(1, len(chunks)):
+            is_last = (idx == len(chunks) - 1)
+            chunk_buttons = buttons if is_last else None
+            last_outcome = await tg_safety.send_message(
+                bot_client, chat_id, chunks[idx],
+                timeout=CALLBACK_EDIT_TIMEOUT_SECONDS, op=f"{op}:chunk_{idx}", logger=logger, buttons=chunk_buttons, **kwargs
+            )
+        return last_outcome
+    else:
+        logger.info("edit_callback_message: could not edit first chunk, sending all chunks via send_message_chunks_async")
+        return await send_message_chunks_async(bot_client, chat_id, text, buttons=buttons, **kwargs)
 
 
 async def handle_onboarding_callback(bot_client, event, data_str):
@@ -15304,7 +15318,10 @@ async def handle_clinical_ai_generation(bot_client, event, section_type: str, su
     btns.append([Button.inline(b_title, data=b_cb), Button.inline("⬅️ В главное меню", data="nav:main")])
 
     await edit_callback_message(bot_client, event, final_text, f"edit_message:{section_type}_ai_result", buttons=btns, parse_mode='html')
-    await event.answer()
+    try:
+        await event.answer()
+    except Exception as ans_e:
+        logger.debug("Failed to answer final ai callback event: %s", ans_e)
 
 async def handle_quiz_callback(bot_client, event):
     """
@@ -17136,7 +17153,7 @@ async def check_and_trigger_referee(bot_client, event, text) -> bool:
     conflict_phrases = [
         "где вас учили", "кто так делает", "кто так препарирует", "бедный зуб",
         "бедный пациент", "вы протокол читали", "вы вообще стоматолог",
-        "удалять и только удалять", "зачем полезли", "что за работа",
+        "удалять и только удалять", "это под удаление", "зачем полезли", "что за работа",
         "курам на смех", "полная лажа", "чушь собачья",
         "руки оторвать", "руки отсохнут", "из жопы", "руки из жопы"
     ]
@@ -17773,13 +17790,15 @@ async def check_and_send_group_activity_pings(bot_client):
                         chat_id, wait_seconds,
                     )
                     break
-                if "Could not find the input entity" in str(send_err):
-                    logger.warning("User %s entity not found. Removing from PM pings.", chat_id)
-                    drop_pm_ping(chat_id_str)
-                    continue
                 _info = load_state().get("pm_pings", {}).get(chat_id_str, {})
                 _err_str = str(send_err).lower()
-                # Постоянные ошибки: InvalidPeer / UserBlocked — blacklist навсегда с 1 попытки
+                # Entity not found — юзер совсем не резолвится. Удаляем из пула.
+                if "could not find the input entity" in _err_str:
+                    logger.warning("Group ping: user %s entity not found. Removing from PM pings.", chat_id)
+                    drop_pm_ping(chat_id_str)
+                    continue
+                # Постоянные ошибки: юзер никогда не открывал бота или заблокировал —
+                # сразу выставляем MAX_PING_FAILURES, чтобы исключить навсегда (1 попытка).
                 _permanent = any(x in _err_str for x in (
                     "invalid peer", "peeridsinvalid", "user is blocked",
                     "userblocked", "bots can't", "bots cannot",
@@ -17788,9 +17807,11 @@ async def check_and_send_group_activity_pings(bot_client):
                 failures = MAX_PING_FAILURES if _permanent else _info.get("ping_failures", 0) + 1
                 commit_pm_ping(chat_id_str, ping_failures=failures)
                 logger.warning(
-                    f"Failed to send group activity ping to {chat_id} "
-                    f"(failure {failures}/{MAX_PING_FAILURES}"
-                    f"{' — PERMANENT BLACKLIST' if _permanent else ''}): {send_err}"
+                    "Failed to send group activity ping to %s "
+                    "(failure %d/%d%s): %s",
+                    chat_id, failures, MAX_PING_FAILURES,
+                    " — PERMANENT BLACKLIST" if _permanent else "",
+                    send_err,
                 )
                 continue
 
