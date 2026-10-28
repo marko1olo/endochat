@@ -5405,8 +5405,7 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
                     is_parent_command = parent_text.startswith(("/ask", "/calc", "/итог", "/quiz", "/case"))
 
                     if (parent_sender_id == sender_id or is_parent_command) and (
-                        (last_case_author and sender_id == last_case_author and (datetime.now() - last_case_time) < timedelta(minutes=30))
-                        or bool(last_case_bot_msg)
+                        last_case_author and sender_id == last_case_author and (datetime.now() - last_case_time) < timedelta(minutes=15)
                     ):
                         logger.info("Doctor %s replied to own message/command #%s in active case thread. Treating as dialogue continuation.", sender_id, reply_to_msg_id)
                         is_parent_bot = True
@@ -5601,10 +5600,14 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
 
         # 1.1. Check Sequential Follow-up from recent case author (when doctor types without Reply button or replies to own message)
         sender_id = getattr(event, "sender_id", None)
+        is_direct_case_reply = bool(reply_to_msg_id and reply_to_msg_id == state.get("last_case_bot_msg_id"))
+        is_passive_text_enabled = bool(getattr(config, "ENABLE_PASSIVE_TEXT", False) and float(getattr(config, "PASSIVE_TEXT_PROBABILITY", 0.0)) > 0.0)
         is_valid_followup_target = (
-            not reply_to_msg_id
-            or (direct_parent and getattr(direct_parent, 'sender_id', None) == sender_id)
-            or (reply_to_msg_id == state.get("last_case_bot_msg_id"))
+            is_direct_case_reply
+            or (is_passive_text_enabled and (
+                not reply_to_msg_id
+                or (direct_parent and getattr(direct_parent, 'sender_id', None) == sender_id)
+            ))
         )
         if not is_dialogue and is_valid_followup_target:
             last_case_author = state.get("last_case_author_id")
@@ -5703,6 +5706,9 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
         # fromisoformat здесь раньше стоял без обработки — битый таймстамп в состоянии
         # ронял весь обработчик сообщения.
         if not is_dialogue:
+            if not getattr(config, "ENABLE_PASSIVE_TEXT", False) or float(getattr(config, "PASSIVE_TEXT_PROBABILITY", 0.0)) <= 0.0:
+                logger.info("Passive text trigger suppressed: uninvited passive text is disabled by config for EndoChat.")
+                return False
             sender_id = getattr(event, "sender_id", None)
             if sender_id and is_author_group_cooldown_active(sender_id):
                 logger.info("Passive text trigger suppressed: author group cooldown active for sender %s (< 10 min)", sender_id)
@@ -6541,6 +6547,11 @@ async def check_and_trigger_assistant_media(bot_client, message, msg_id, text, m
 
     # Enforce 2-hour cooldown for passive media trigger, unless it's a direct reply or mention
     is_passive = not (is_direct_reply or is_mentioned)
+
+    if is_passive:
+        if not getattr(config, "ENABLE_PASSIVE_MEDIA", False) or float(getattr(config, "PASSIVE_MEDIA_PROBABILITY", 0.0)) <= 0.0:
+            logger.info("Media Assistant: passive media trigger suppressed: uninvited passive media is disabled by config for EndoChat (msg_id=%s).", msg_id)
+            return False
 
     # 0. Строгая проверка актуальности (защита от разбора старых снимков из истории):
     msg_dt = getattr(message, 'date', None)

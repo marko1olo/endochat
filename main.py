@@ -3083,8 +3083,8 @@ async def handle_new_message(event):
                 )
 
             # Unanswered Question Lifeline (Протокол «Первый ответ») для неактивных чатов:
-            # Если задан клинический вопрос не боту, запускаем 20-минутный спасательный круг
-            if text and not is_direct_bot_call:
+            # Если задан клинический вопрос не боту, запускаем 20-минутный спасательный круг (если включен в config)
+            if getattr(config, "ENABLE_QUESTION_LIFELINE", False) and text and not is_direct_bot_call:
                 if question_lifeline.is_clinical_question_candidate(text=text, has_media=has_media, sender_is_bot=is_any_bot):
                     lifeline_manager.track_question(
                         msg_id=msg_id,

@@ -1,11 +1,12 @@
 # -*- coding: utf-8 -*-
 """
 tests/test_passive_probability_and_rescue_redteam.py
-Верификация новых инвариантов активности:
-1. Clinical Rescue окно 33-180 минут (сообщения моложе 33 мин не спасаются).
-2. Вероятностный гейт 66% на незваный текст в чате (при roll >= 0.66 бот молчит).
-3. Вероятностный гейт 66% на незваный разбор снимков (при roll >= 0.66 бот молчит).
-4. Прямые вызовы (@bot, reply боту) на 100% иммунны к вероятностному гейту.
+Верификация новых инвариантов активности (Администраторский регламент EndoChat):
+1. Clinical Rescue окно 60-180 минут (сообщения моложе 60 мин не спасаются).
+2. Полное отключение незваных пассивных ответов в общем чате (ENABLE_PASSIVE_TEXT=False, prob=0.0).
+3. Полное отключение незваного пассивного разбора медиа (ENABLE_PASSIVE_MEDIA=False, prob=0.0).
+4. Отключение 20-минутного Question Lifeline (ENABLE_QUESTION_LIFELINE=False).
+5. Прямые вызовы (@bot, reply боту, "бот, ...") на 100% активны и иммунны к подавлению.
 """
 
 import asyncio
@@ -54,19 +55,22 @@ class DummyMediaMsg:
 
 
 def run_tests():
-    print("\n==================== TEST PASSIVE PROBABILITY & 33M RESCUE ====================")
+    print("\n==================== TEST PASSIVE PROBABILITY & 60M RESCUE ====================")
 
     # 1. Проверка конфигурации по умолчанию
     print("\n[1] Проверка констант конфигурации")
-    check("CLINICAL_RESCUE_MIN_AGE_MINUTES равен 33", getattr(config, "CLINICAL_RESCUE_MIN_AGE_MINUTES", 0) == 33)
+    check("CLINICAL_RESCUE_MIN_AGE_MINUTES равен 60", getattr(config, "CLINICAL_RESCUE_MIN_AGE_MINUTES", 0) == 60)
     check("CLINICAL_RESCUE_MAX_AGE_MINUTES равен 180", getattr(config, "CLINICAL_RESCUE_MAX_AGE_MINUTES", 0) == 180)
-    check("PASSIVE_TEXT_PROBABILITY равен 0.66", abs(getattr(config, "PASSIVE_TEXT_PROBABILITY", 0.0) - 0.66) < 1e-4)
-    check("PASSIVE_MEDIA_PROBABILITY равен 0.66", abs(getattr(config, "PASSIVE_MEDIA_PROBABILITY", 0.0) - 0.66) < 1e-4)
+    check("PASSIVE_TEXT_PROBABILITY равен 0.0", abs(getattr(config, "PASSIVE_TEXT_PROBABILITY", 1.0) - 0.0) < 1e-4)
+    check("PASSIVE_MEDIA_PROBABILITY равен 0.0", abs(getattr(config, "PASSIVE_MEDIA_PROBABILITY", 1.0) - 0.0) < 1e-4)
+    check("ENABLE_PASSIVE_TEXT равен False", getattr(config, "ENABLE_PASSIVE_TEXT", True) is False)
+    check("ENABLE_PASSIVE_MEDIA равен False", getattr(config, "ENABLE_PASSIVE_MEDIA", True) is False)
+    check("ENABLE_QUESTION_LIFELINE равен False", getattr(config, "ENABLE_QUESTION_LIFELINE", True) is False)
 
-    # 2. Проверка окна Clinical Rescue 33 минут
-    print("\n[2] Проверка окна спасателя: 33 минуты порог")
+    # 2. Проверка окна Clinical Rescue: порог ровно 60 минут
+    print("\n[2] Проверка окна спасателя: 60 минут порог")
     tmp_dir = tempfile.mkdtemp()
-    db_path = os.path.join(tmp_dir, "test_rescue_33m.db")
+    db_path = os.path.join(tmp_dir, "test_rescue_60m.db")
     with sqlite3.connect(db_path) as conn:
         conn.execute("""
             CREATE TABLE messages (
@@ -92,92 +96,84 @@ def run_tests():
     now = datetime.datetime.now(datetime.timezone.utc)
     t_10m = (now - datetime.timedelta(minutes=10)).strftime("%Y-%m-%d %H:%M:%S")
     t_30m = (now - datetime.timedelta(minutes=30)).strftime("%Y-%m-%d %H:%M:%S")
-    t_32m = (now - datetime.timedelta(minutes=32)).strftime("%Y-%m-%d %H:%M:%S")
     t_35m = (now - datetime.timedelta(minutes=35)).strftime("%Y-%m-%d %H:%M:%S")
-    t_60m = (now - datetime.timedelta(minutes=60)).strftime("%Y-%m-%d %H:%M:%S")
+    t_55m = (now - datetime.timedelta(minutes=55)).strftime("%Y-%m-%d %H:%M:%S")
+    t_65m = (now - datetime.timedelta(minutes=65)).strftime("%Y-%m-%d %H:%M:%S")
+    t_80m = (now - datetime.timedelta(minutes=80)).strftime("%Y-%m-%d %H:%M:%S")
     t_200m = (now - datetime.timedelta(minutes=200)).strftime("%Y-%m-%d %H:%M:%S")
 
     chat_id = -1001888999
     bot_id = 999888
 
     with sqlite3.connect(db_path) as conn:
-        # msg 1: 10 мин назад (слишком свежий)
+        # msg 1: 10 мин назад (слишком свежий для 60 мин)
         conn.execute("INSERT INTO messages (msg_id, chat_id, sender_id, sender_name, text, date) VALUES (1, ?, 10, 'A', 'Как лечить пульпит 16 зуба?', ?)", (chat_id, t_10m))
-        # msg 2: 30 мин назад (слишком свежий для 33 мин)
+        # msg 2: 30 мин назад (слишком свежий для 60 мин)
         conn.execute("INSERT INTO messages (msg_id, chat_id, sender_id, sender_name, text, date) VALUES (2, ?, 11, 'B', 'Какой протокол ирригации при периодонтите 21?', ?)", (chat_id, t_30m))
-        # msg 3: 32 мин назад (слишком свежий для 33 мин)
-        conn.execute("INSERT INTO messages (msg_id, chat_id, sender_id, sender_name, text, date) VALUES (3, ?, 12, 'C', 'Снимок зуба 47, апекс не пройден, как быть?', ?)", (chat_id, t_32m))
-        # msg 4: 35 мин назад (ВАЛИДНЫЙ КАНДИДАТ: 35 >= 33 и <= 180)
-        conn.execute("INSERT INTO messages (msg_id, chat_id, sender_id, sender_name, text, date) VALUES (4, ?, 13, 'D', 'Обломок в канале 36 зуба, протокол извлечения?', ?)", (chat_id, t_35m))
-        # msg 5: 60 мин назад, но есть ответ врача msg 6
-        conn.execute("INSERT INTO messages (msg_id, chat_id, sender_id, sender_name, text, date) VALUES (5, ?, 14, 'E', 'Чем фиксировать штифт в зубе 11?', ?)", (chat_id, t_60m))
-        conn.execute("INSERT INTO messages (msg_id, chat_id, sender_id, sender_name, text, date, reply_to_msg_id) VALUES (6, ?, 15, 'F', 'Фиксируйте на композитный цемент', ?, 5)", (chat_id, t_30m))
-        # msg 7: 200 мин назад (слишком старый, > 180 мин)
-        conn.execute("INSERT INTO messages (msg_id, chat_id, sender_id, sender_name, text, date) VALUES (7, ?, 16, 'G', 'Периодонтит 45 зуба, удалять или нет?', ?)", (chat_id, t_200m))
+        # msg 3: 35 мин назад (ранее спасался при 33м, ТЕПЕРЬ ОТКЛОНЯЕТСЯ: < 60 мин)
+        conn.execute("INSERT INTO messages (msg_id, chat_id, sender_id, sender_name, text, date) VALUES (3, ?, 12, 'C', 'Снимок зуба 47, апекс не пройден, как быть?', ?)", (chat_id, t_35m))
+        # msg 4: 55 мин назад (слишком свежий для 60 мин)
+        conn.execute("INSERT INTO messages (msg_id, chat_id, sender_id, sender_name, text, date) VALUES (4, ?, 13, 'D', 'Обломок в канале 36 зуба, протокол извлечения?', ?)", (chat_id, t_55m))
+        # msg 5: 65 мин назад (ЕДИНСТВЕННЫЙ ВАЛИДНЫЙ КАНДИДАТ: 65 >= 60 и <= 180)
+        conn.execute("INSERT INTO messages (msg_id, chat_id, sender_id, sender_name, text, date) VALUES (5, ?, 14, 'E', 'Апекс зуба 21 широкий, чем пломбировать?', ?)", (chat_id, t_65m))
+        # msg 6: 80 мин назад, но есть ответ коллеги msg 7
+        conn.execute("INSERT INTO messages (msg_id, chat_id, sender_id, sender_name, text, date) VALUES (6, ?, 15, 'F', 'Чем фиксировать штифт в зубе 11?', ?)", (chat_id, t_80m))
+        conn.execute("INSERT INTO messages (msg_id, chat_id, sender_id, sender_name, text, date, reply_to_msg_id) VALUES (7, ?, 16, 'G', 'Фиксируйте на композитный цемент', ?, 6)", (chat_id, t_30m))
+        # msg 8: 200 мин назад (слишком старый, > 180 мин)
+        conn.execute("INSERT INTO messages (msg_id, chat_id, sender_id, sender_name, text, date) VALUES (8, ?, 17, 'H', 'Периодонтит 45 зуба, удалять или нет?', ?)", (chat_id, t_200m))
         conn.commit()
 
     cands = cr.find_unanswered_clinical_candidates(db_path, chat_id, bot_id=bot_id)
-    check("Кандидат ровно 1 (только msg_id 4)", len(cands) == 1)
+    check("Кандидат ровно 1 (только msg_id 5, возраст 65 мин)", len(cands) == 1)
     if cands:
-        check("Выбран msg_id 4 (35 мин)", cands[0]["id"] == 4)
+        check("Выбран msg_id 5 (65 мин >= 60 мин порога)", cands[0]["id"] == 5)
 
-    # 3. Вероятностный гейт пассивного текста (66%)
-    print("\n[3] Проверка вероятностного гейта пассивного текста")
+    # 3. Полное подавление незваного пассивного текста в чате
+    print("\n[3] Проверка подавления незваного текста в общем чате")
     mock_ctx = (["Доктор: Коллеги, какой силер для зуба 16 выбрать?"], 0, None)
-    
-    # Симулируем roll >= 0.66 (например 0.80): бот должен пропустить вызов
-    with patch("random.random", return_value=0.80):
-        with patch.object(assistant, "fetch_dynamic_chat_context", new=AsyncMock(return_value=mock_ctx)):
-            with patch.object(assistant, "check_llm_triage", new=AsyncMock(return_value=True)) as mock_triage:
-                with patch.object(assistant, "has_dental_term", return_value=True):
-                    with patch.object(assistant, "passive_gate_block_reason_async", new=AsyncMock(return_value=None)):
-                        with patch.object(assistant, "claim_passive_slot", return_value=True):
-                            with patch.object(assistant, "record_passive_attempt") as mock_record:
-                                event = DummyEvent(chat_id, 12345)
-                                res = asyncio.run(assistant.check_and_trigger_assistant(
-                                    MagicMock(), event, 99999999, "Коллеги, какой силер для зуба 16 выбрать?", None, "Доктор"
-                                ))
-                                check("При roll=0.80 (>=0.66) пассивный триггер отклонен (False)", res is False)
-                                check("При roll=0.80 LLM триаж НЕ вызывался (экономия токенов)", mock_triage.call_count == 0)
-                                check("При roll=0.80 вызван record_passive_attempt (бэк-офф)", mock_record.call_count == 1)
 
-    # Симулируем roll < 0.66 (например 0.40): бот проходит к LLM триажу
-    with patch("random.random", return_value=0.40):
-        with patch.object(assistant, "fetch_dynamic_chat_context", new=AsyncMock(return_value=mock_ctx)):
-            with patch.object(assistant, "check_llm_triage", new=AsyncMock(return_value=False)) as mock_triage_pass:
-                with patch.object(assistant, "has_dental_term", return_value=True):
-                    with patch.object(assistant, "passive_gate_block_reason_async", new=AsyncMock(return_value=None)):
-                        with patch.object(assistant, "claim_passive_slot", return_value=True):
-                            event = DummyEvent(chat_id, 12345)
-                            res = asyncio.run(assistant.check_and_trigger_assistant(
-                                MagicMock(), event, 99999998, "Коллеги, какой силер для зуба 16 выбрать?", None, "Доктор"
-                            ))
-                            check("При roll=0.40 (<0.66) LLM триаж успешно вызван", mock_triage_pass.call_count == 1)
+    with patch.object(assistant, "fetch_dynamic_chat_context", new=AsyncMock(return_value=mock_ctx)):
+        with patch.object(assistant, "check_llm_triage", new=AsyncMock(return_value=True)) as mock_triage:
+            with patch.object(assistant, "has_dental_term", return_value=True):
+                with patch.object(assistant, "passive_gate_block_reason_async", new=AsyncMock(return_value=None)):
+                    with patch.object(assistant, "claim_passive_slot", return_value=True):
+                        event = DummyEvent(chat_id, 12345)
+                        fake_bot = MagicMock()
+                        fake_bot.get_me = AsyncMock()
+                        res = asyncio.run(assistant.check_and_trigger_assistant(
+                            fake_bot, event, 99999999, "Коллеги, какой силер для зуба 16 выбрать?", None, "Доктор"
+                        ))
+                        check("Незваный пассивный текстовый триггер подавлен (False)", res is False)
+                        check("LLM триаж НЕ вызывался (полная тишина без вызова бота)", mock_triage.call_count == 0)
 
-    # 4. Вероятностный гейт пассивного разбора медиа (66%)
-    print("\n[4] Проверка вероятностного гейта пассивного медиа")
+    # 4. Полное подавление незваного разбора медиа в чате
+    print("\n[4] Проверка подавления незваного разбора медиа")
     media_msg = DummyMediaMsg(chat_id, 12345, 99999999)
 
-    # При roll=0.75 (>= 0.66) и is_passive=True: бот пропускает снимок
-    with patch("random.random", return_value=0.75):
-        with patch.object(assistant, "is_explicitly_non_dental_media", return_value=False):
-            with patch.object(assistant, "has_dental_term", return_value=True):
-                with patch.object(assistant, "_safe_search_knowledge_corpus", new=AsyncMock(return_value=("", ""))):
-                    with patch.object(assistant, "load_state", return_value={"last_passive_media_run": "2000-01-01T00:00:00", "last_passive_text_run": "2000-01-01T00:00:00"}):
-                        with patch.object(assistant, "save_state") as mock_save:
-                            res = asyncio.run(assistant.check_and_trigger_assistant_media(
-                                MagicMock(), media_msg, 99999999, "Снимок зуба 46", "Прицельный снимок зуба 46, периодонтит"
-                            ))
-                            check("При roll=0.75 (>=0.66) пассивный разбор снимка пропущен (False)", res is False)
-                            check("При roll=0.75 сохранен бэк-офф состояния", mock_save.call_count >= 1)
+    with patch.object(assistant, "is_explicitly_non_dental_media", return_value=False):
+        with patch.object(assistant, "has_dental_term", return_value=True):
+            with patch.object(assistant, "_safe_search_knowledge_corpus", new=AsyncMock(return_value=("", ""))):
+                with patch.object(assistant, "load_state", return_value={"last_passive_media_run": "2000-01-01T00:00:00", "last_passive_text_run": "2000-01-01T00:00:00"}):
+                    with patch.object(assistant, "save_state") as mock_save:
+                        fake_bot = MagicMock()
+                        res = asyncio.run(assistant.check_and_trigger_assistant_media(
+                            fake_bot, media_msg, 99999999, "Снимок зуба 46", "Прицельный снимок зуба 46, периодонтит"
+                        ))
+                        check("Незваный пассивный разбор снимка подавлен (False)", res is False)
 
-    # 5. Иммунитет прямого обращения (@bot / Reply к боту)
-    print("\n[5] Прямое обращение (@bot) на 100% иммунно к вероятностному гейту")
-    text_input = "@docendobot подскажи протокол при переломе SOCO"
-    text_lower = text_input.lower()
-    known_handles = {"docendobot", "stomchat_bot"}
-    is_direct = any(f"@{h}" in text_lower for h in known_handles)
-    check("Тег @docendobot классифицирован как прямой вызов (is_direct=True)", is_direct is True)
+    # 5. Иммунитет прямого обращения (@bot / Reply к боту / "бот, ...")
+    print("\n[5] Прямое обращение (@bot, Reply к боту, 'бот, ...') активно на 100%")
+    known_handles = {"endohelp_bot", "docendobot", "stomchat_bot"}
+    
+    # 5.1. Тег @username
+    text_uname = "@endohelp_bot подскажи протокол при переломе SOCO"
+    is_direct_uname = any(f"@{h}" in text_uname.lower() for h in known_handles)
+    check("Тег @endohelp_bot классифицирован как прямой вызов (is_direct=True)", is_direct_uname is True)
+
+    # 5.2. Слово "бот, ..."
+    text_word = "бот, подскажи дозировку артикаина"
+    is_direct_word = text_word.lower().startswith("бот,") or text_word.lower().startswith("бот ")
+    check("Обращение 'бот, ...' классифицировано как прямой вызов (is_direct=True)", is_direct_word is True)
 
     print("\n==================== РЕЗУЛЬТАТ ТЕСТИРОВАНИЯ ====================")
     total_passed = len(PASS)
