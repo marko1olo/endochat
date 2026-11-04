@@ -32,6 +32,10 @@ _TMPDIR = tempfile.mkdtemp(prefix="stomchat_cascade_")
 # Журнал уводим ДО импорта модулей проекта: иначе прогон пишет в боевой bot.log.
 os.environ["STOMCHAT_LOG_PATH"] = os.path.join(_TMPDIR, "cascade_test.log")
 
+ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if ROOT_DIR not in sys.path:
+    sys.path.insert(0, ROOT_DIR)
+
 import config  # noqa: E402
 import runtime_guard  # noqa: E402
 import gemini_client as gc  # noqa: E402
