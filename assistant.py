@@ -10096,14 +10096,19 @@ async def _async_pm_supplement_job(bot_client, chat_id, user_question, initial_a
         supplement_text = html.unescape(supplement_text).strip()
         supplement_text = re.sub(r'\n{3,}', '\n\n', supplement_text)
         # Коллегиальная подача обдуманного клинического нюанса от врача врачу
-        chosen_header = "Коллега, ещё раз проанализировал твой случай у кресла... Решил добавить важный клинический нюанс:"
+        collegial_intros = [
+            "Коллега, ещё раз проанализировал твой случай у кресла... Решил добавить важный клинический нюанс:",
+            "Коллега, перепроверил протокол по твоему кейсу — обрати внимание на ключевой момент:",
+            "Коллега, в продолжение разбора: ещё раз взвесил риски и хочу акцентировать:",
+        ]
+        chosen_header = random.choice(collegial_intros)
         formatted_message = f"<b>{chosen_header}</b>\n\n{supplement_text}"
         formatted_message = clean_html_formatting(formatted_message)
         formatted_message = sanitize_clinical_pm_output(formatted_message)
         formatted_message = re.sub(r'\n{3,}', '\n\n', formatted_message.strip())
 
         # Проверка полезной длины очищенного текста после санитизации
-        body_only = formatted_message.replace(f"<b>{chosen_header}</b>", "").strip()
+        body_only = supplement_text.strip()
         if not body_only or len(body_only) < 25:
             logger.info(f"PM supplement discarded after sanitization (too short or empty) for chat_id={chat_id}")
             return
@@ -18314,7 +18319,12 @@ async def check_and_send_pm_pings(bot_client):
                     reply_text = response.text.strip()
                     if not reply_text or reply_text.upper() == "NONE" or len(reply_text) < 15:
                         logger.info(f"PM ping for chat_id={chat_id}: no clinical case to follow up (NONE).")
-                        commit_pm_ping(chat_id_str, ping_sent=True, ping_failures=0, unanswered_pings=1)
+                        # Если прошло >= 72 ч и кейса нет — архивируем без назойливости.
+                        # Если прошло 18-72 ч — кейс еще может развиваться, фиксируем время триажа без сжигания!
+                        if hours_since >= MIN_CLINICAL_PING_DELAY_HOURS:
+                            commit_pm_ping(chat_id_str, ping_sent=True, ping_failures=0, unanswered_pings=1)
+                        else:
+                            commit_pm_ping(chat_id_str, last_triage_evaluated=now.isoformat())
                         continue
 
                     reply_text = clean_html_formatting(reply_text)
@@ -18322,8 +18332,10 @@ async def check_and_send_pm_pings(bot_client):
                     fresh = load_state().get("pm_pings", {}).get(chat_id_str, {})
                     if fresh.get("pings_opted_out") or fresh.get("ping_sent", False):
                         continue
-                    if get_msk_now() - _parse_state_dt(fresh.get("last_activity")) < timedelta(hours=MIN_CLINICAL_PING_DELAY_HOURS):
-                        logger.info(f"User {chat_id} became active while ping was generating. Skipping.")
+                    # Проверяем не отправил ли врач новое сообщение во время генерации ответа LLM
+                    fresh_act = _parse_state_dt(fresh.get("last_activity"))
+                    if fresh_act > last_activity:
+                        logger.info(f"User {chat_id} sent message while ping was generating. Skipping.")
                         continue
 
                     try:
