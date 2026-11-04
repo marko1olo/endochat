@@ -9,6 +9,13 @@ tests/test_passive_probability_and_rescue_redteam.py
 5. Прямые вызовы (@bot, reply боту, "бот, ...") на 100% активны и иммунны к подавлению.
 """
 
+import os
+import sys
+
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
 import asyncio
 import datetime
 import os

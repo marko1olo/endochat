@@ -1,8 +1,14 @@
+import os
+import sys
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
 import sqlite3
 import re
 
 def test_sieve(limit=5000):
-    con = sqlite3.connect(r'c:\Users\danat\Desktop\stomchat\stomat_bot.db')
+    con = sqlite3.connect('file:' + os.path.abspath(r'c:\Users\danat\Desktop\stomchat\stomat_bot.db') + '?mode=ro', uri=True)
     cur = con.cursor()
 
     # Query human messages sorted by date or length
