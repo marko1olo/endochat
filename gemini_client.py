@@ -626,16 +626,18 @@ def note_key_failure(provider, api_key, error_text, model_name=None):
 # Короткие классификаторы: у всех вызывающих thinking_level LOW и ответ в одну
 # строку. Первой идёт groq-llama — на такой задаче она быстрее lite-моделей.
 TRIAGE_KINDS = frozenset({
-    "llama_triage", "bot_mention_triage", "response_validator", "referee_analyser",
+    "llama_triage", "bot_mention_triage", "referee_analyser",
     "group_ping_hot_check", "protocol_extraction",
     "react_standalone_triage", "react_triage",  # реакции — дешёвый lite-каскад
     "poll_triage",
+    # response_validator убран: клинический рецензент требует HIGH thinking_level.
 })
 # Живой диалог: ответ ждёт врач в чате, поэтому впереди lite-модели.
 CHAT_KINDS = frozenset({
     "assistant", "assistant_media", "pm_chat", "pm_ping", "bot_mention_reply",
     "group_ask", "group_quiz_gen", "group_explainer", "group_referee",
     "transcription_corrector",
+    "response_validator",
     # pm_web_lookup — ответ по выдержкам веб-поиска на команду /web. Это живой
     # диалог: врач ждёт в чате, и впереди должны идти lite-модели. Вид добавлен
     # вместе с самой командой, и без этой строки он проваливался в else, то есть
@@ -755,7 +757,7 @@ def is_media_task(status_context=None, prompt=None) -> bool:
         # Triage, классификаторы и валидаторы ответов (response_validator) — это ВСЕГДА
         # чисто текстовые задачи. Они никогда не должны попадать в тяжёлый медиа-каскад,
         # даже если в тексте проверяемого черновика или контексте цитируется снимок.
-        if status_context.get("kind") in TRIAGE_KINDS:
+        if status_context.get("kind") in TRIAGE_KINDS or status_context.get("kind") == "response_validator":
             return False
         if status_context.get("has_media"):
             return True
@@ -764,7 +766,7 @@ def is_media_task(status_context=None, prompt=None) -> bool:
         if status_context.get("kind") in ("assistant_media", "assistant_media_pm", "media_fallback"):
             return True
     if prompt and isinstance(prompt, str):
-        if status_context and status_context.get("kind") in TRIAGE_KINDS:
+        if status_context and (status_context.get("kind") in TRIAGE_KINDS or status_context.get("kind") == "response_validator"):
             return False
         for pat in MEDIA_PROMPT_PATTERNS:
             if pat.search(prompt):

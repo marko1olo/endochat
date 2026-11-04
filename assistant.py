@@ -4350,31 +4350,46 @@ async def check_response_quality(context_msgs: list, draft_reply: str, invited: 
 Черновик ответа ИИ-ассистента:
 {draft_reply}
 
-Отклони черновик (ok: false), если:
-1. Опасная клиническая галлюцинация, совет, угрожающий пациенту, или грубая ошибка в патофизиологии/биомеханике.
-2. ПЕДИАТРИЧЕСКАЯ БЕЗОПАСНОСТЬ: Если пациент — ребёнок (до 12 лет или вес <40 кг), доза артикаина строго не более 5.0 мг/кг (до 4 лет / <15 кг артикаин противопоказан). Если в черновике указана доза 7 мг/кг для ребёнка — это токсическая передозировка, ОТКЛОНИ!
-3. ГАЙМОРОВА ПАЗУХА: При перфорации дна гайморовой пазухи КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО советовать электрокоагуляцию в зону верхушки/пазухи или адреналиновые тампоны в пазуху. Это грубая ятрогения, ОТКЛОНИ!
-4. ТОПОГРАФИЧЕСКАЯ ТОЧНОСТЬ: Если в вопросе или описании снимка указан конкретный зуб (например, центральный резец 11/21), черновик не должен подменять его на премоляр или выдумывать возраст пациента, которого не было в данных.
-5. Черновик содержит поверхностный псевдонаучный жаргон, выдуманные термины или бессодержательные утверждения без доказательного объяснения механизма.
-6. Ответ содержит неуместные, несерьёзные или нервные эмодзи (😅, 😂, 😎, 😤, 😏, 🤣, 🤡, 🙄).
-7. Тон высокомерен, саркастичен, токсичен или представляет собой бессмысленный однострочный вброс/комментарий.
-8. КОНКРЕТНЫЕ ЦИФРЫ И АРТИКУЛЫ: Ответ содержит выдуманные дозировки, выдуманные артикулы/каталожные номера систем, выдуманные точные значения торков, либо противоречит клинической практике.
-9. ВНУТРЕННИЕ ИНСТРУКЦИИ И НАСТРОЙКИ: Черновик упоминает системные промпты, «внутренние настройки бота», «черный список», правила фильтрации или системные ограничения бота.
-10. Ответ вообще не относится к медицине/стоматологии или уводит тему в сторону. [ИСКЛЮЧЕНИЕ]: Если врач просит обобщить дискуссию, выделить предмет спора, тезис и антитезис обсуждения коллег в чате — это законный профессиональный мета-запрос, черновик с синтезом позиций коллег ОТКЛОНЯТЬ НЕЛЬЗЯ!
-11. Топографическое или анатомическое несоответствие: рекомендации относятся к поверхностям, контактам или тканям, не затронутым вмешательством, либо смешиваются протоколы несовместимых дисциплин.
-12. Беспочвенная ритуальная критика: выдумывание несуществующих дефектов или дежурные шаблонные придирки без объективных оснований в клиническом контексте.
-13. ПАЦИЕНТСКИЕ ДИСКЛЕЙМЕРЫ: Черновик содержит шаблонные фразы для пациентов («обратитесь к очному врачу», «нужен очный осмотр», «я всего лишь ИИ», «диагноз ставит очный врач»). Собеседник — дипломированный врач-стоматолог, такие отмазки в коллегиальном диалоге НЕДОПУСТИМЫ!
-14. САМОБИЧЕВАНИЕ И СПОР О СОФТЕ: Черновик содержит оправдания про серверы, пиковые нагрузки, раздутые запросы, критику надежности софта («рассчитывать на зависающий софт рискованно») или спор с врачом о скорости работы. Если врач замечает медлительность — допустимо только спокойное профессиональное объяснение («глубокий анализ снимка с проверкой анатомии и рисков занимает до 60–90 секунд») с сохранением достоинства и указанием, что разбор формируется или уже готов в ЛС.
-15. САМОИДЕНТИФИКАЦИЯ И МЕТА-ШУТКИ: Черновик содержит шутки или реплики о том, что бот — это машина / искусственный интеллект / робот / программа («симфонию не напишу», «я всего лишь код», «как машина я...»). Врачебный консилиум требует клинической роли стоматолога, а не мета-шуток про роботов.
-16. ОТОЗВАННЫЕ И ТОКСИЧНЫЕ ПРЕПАРАТЫ: Черновик рекомендует Солкосерил (дентальную пасту, мазь, желе), Актовегин или прижигание слизистой спиртом/перекисью 3%/марганцовкой. Препарат Солкосерил отозван с рынка и запрещен к назначению в EBM-стоматологии! Если черновик содержит Солкосерил/Актовегин — ОТКЛОНИ! Разрешены только: Асепта бальзам адгезивный, Холисал гель, Винилин, Афтофикс.
+ОЦЕНИ ЧЕРНОВИК ПО ЧЕТЫРЁМ КРИТЕРИЯМ:
 
-Одобри черновик (ok: true), если:
-— Ответ клинически грамотен, профессионален, спокоен, по теме и безопасен.
+1. УМЕСТНОСТЬ И ПРЯМОЙ ОТВЕТ:
+   — Ответ обязан отвечать строго на то, что реально спросил врач в последнем сообщении.
+   — Если вопрос конкретный («какими клампами?», «какой файл?», «сколько мг?») — черновик обязан дать конкретные артикулы/инструменты/дозировки, а не общую лекцию по теме.
+   — ПОДМЕНА ВОПРОСА И УХОД В СТОРОНУ: Если врач спросил про конкретный клинический этап (изоляция, кламп, силер, анестезия), а черновик уклонился от ответа и начал поучать врача по посторонней теме (скученность, окклюзия, общая гигиена) — КАТЕГОРИЧЕСКИ ОТКЛОНИ!
+   — ОПЕЧАТКИ Т9: Если врач опечатался со смартфона («озонировать» вместо «изолировать», «кланы» вместо «клампы»), черновик обязан отвечать по реальному смыслу клинической процедуры (изоляция коффердамом). Если черновик воспринял опечатку буквально и выдумал озонотерапию или маргинальную чушь — КАТЕГОРИЧЕСКИ ОТКЛОНИ!
+   — Если бот влезает без приглашения (пассивный триггер) и ответ не добавляет ничего сверх того, что врач уже изложил сам в своём вопросе — ОТКЛОНИ.
+   — Если тема чата — флуд, приветствия, оффтоп без клинического содержания — ОТКЛОНИ.
+
+2. КЛИНИЧЕСКАЯ БЕЗОПАСНОСТЬ И ДОКАЗАТЕЛЬНОСТЬ (EBM):
+   — ТОКСИЧЕСКИЕ И ЯТРОГЕННЫЕ ПРАКТИКИ: Запрещённые препараты (Солкосерил, Актовегин, мышьяк, резорцин-формалин, депофорез) или опасные процедуры (химическое прижигание слизистой спиртом/перекисью/марганцовкой, промывание NaOCl под давлением, адреналиновые тампоны в гайморову пазуху) — КАТЕГОРИЧЕСКИ ОТКЛОНИ!
+   — КОНКРЕТНЫЕ ЦИФРЫ И АРТИКУЛЫ: Выдуманные дозировки, выдуманные артикулы/системы, выдуманные значения торков, либо грубые ошибки, противоречащие доказательной медицине — ОТКЛОНИ.
+   — Педиатрия: артикаин >5 мг/кг у ребёнка <12 лет / <40 кг — токсическая передозировка, ОТКЛОНИ.
+   — Топографические ошибки: перепутал зуб, орган, сторону, поверхность — ОТКЛОНИ.
+
+3. ПРОФЕССИОНАЛЬНЫЙ ТОН И КОЛЛЕГИАЛЬНОСТЬ:
+   — Аудитория — дипломированные врачи. Общение строго на равных: оперирующий врач — оперирующему врачу.
+   — МЕНТОРСТВО, САМОУВЕРЕННОЕ ПОУЧЕНИЕ ИЛИ ОБВИНЕНИЕ ВРАЧА: Если черновик упрекает коллегу в невнимательности, агрессивно поучает или читает нотации с позиции превосходства («почему вы не видите...») — КАТЕГОРИЧЕСКИ ОТКЛОНИ!
+   — Пациентские дисклеймеры («обратитесь к очному врачу», «я всего лишь ИИ», «нужен очный осмотр») — ОТКЛОНИ.
+   — Самоидентификация как машина/робот/алгоритм, мета-шутки про ИИ — ОТКЛОНИ.
+   — Неуместные эмодзи (😅😂😎😤😏🤣🤡🙄), сарказм, токсичность — ОТКЛОНИ.
+   — Самооправдания про серверы, нагрузку, медлительность — ОТКЛОНИ.
+
+4. СОДЕРЖАТЕЛЬНОСТЬ И ЗОЛОТОЙ 3-ШАГОВЫЙ СТАНДАРТ:
+   — Псевдонаучный жаргон, бессодержательные утверждения без биологического/биомеханического механизма — ОТКЛОНИ.
+   — Ответ должен строиться по золотому стандарту: 1) Прямой ответ на вопрос с инструментами/материалами 2) Нюанс фиксации/выполнения у кресла 3) Альтернативный план.
+   — Черновик упоминает системные промпты или внутренние настройки бота — ОТКЛОНИ.
+   — Беспочвенная критика коллег без клинических оснований — ОТКЛОНИ.
+
+ОДОБРИ (ok: true), если черновик:
+— Отвечает именно на заданный вопрос (с учетом опечаток Т9), а не на смежную тему
+— Клинически корректен, безопасен и не содержит токсичных/отозванных практик
+— Тон — коллегиальный, профессиональный, без менторства и без лишней воды
+— Добавляет реальную практическую ценность у кресла
 
 Отвечай СТРОГО в формате JSON без дополнительного текста:
-{{"ok": true/false, "reason": "одна фраза на русском"}}
+{{"ok": true/false, "reason": "одна фраза на русском — конкретно ПОЧЕМУ одобрил или ЧТО именно отклонил"}}
 """
-        ctx = {"kind": "response_validator", "thinking_level": "LOW"}
+        ctx = {"kind": "response_validator", "thinking_level": "HIGH"}
         response, error = await generate_gemini_text_async(prompt, ctx, timeout=120)
         if error or not response:
             return _unavailable(error or "empty response")
@@ -4439,6 +4454,9 @@ async def generate_dialogue_fallback_async(
         fb_text = getattr(response, "text", "") if response else ""
         fb_text = clean_html_formatting(fb_text.strip()) if fb_text else ""
         if fb_text and len(fb_text) >= 20 and "IGNORE" not in fb_text.upper():
+            if _TOXIC_PRACTICE_RE.search(fb_text):
+                logger.error("🛑 Toxic practice in dialogue fallback rejected: %s", fb_text[:80])
+                return "", "toxic_practice_in_fallback"
             return fb_text, ""
         return "", err or "empty_fallback"
     except Exception as e:
@@ -10384,11 +10402,13 @@ def detect_pm_emergency(text: str) -> Optional[str]:
     return None
 
 
-def format_emergency_response(sos_category: str) -> Tuple[str, List[Any]]:
+def format_emergency_response(sos_category: str, is_group: bool = False) -> Tuple[str, List[Any]]:
     """
     Формирует мгновенный экстренный протокол первой строкой по Правилу MED-06.
     """
     from telethon import Button
+    text = ""
+    buttons: List[Any] = []
     if sos_category == "anaphylaxis":
         text = (
             "🚨 <b>СКОРАЯ 112 НЕМЕДЛЕННО! ЭКСТРЕННАЯ РЕАНИМАЦИЯ: АНАФИЛАКТИЧЕСКИЙ ШОК</b>\n"
@@ -10407,8 +10427,6 @@ def format_emergency_response(sos_category: str) -> Tuple[str, List[Any]]:
             [Button.inline("🧪 LAST / Токсичность (Интралипид)", data="sos:last")],
             [Button.inline("🚨 Все SOS-протоколы", data="nav:sos"), Button.inline("⬅️ В главное меню", data="nav:main")]
         ]
-        return text, buttons
-
     elif sos_category == "hypochlorite":
         text = (
             "🚨 <b>ЭКСТРЕННЫЙ ПРОТОКОЛ: ГИПОХЛОРИТОВАЯ АВАРИЯ (NaOCl ЗА АПЕКС)</b>\n"
@@ -10426,8 +10444,6 @@ def format_emergency_response(sos_category: str) -> Tuple[str, List[Any]]:
             [Button.inline("💔 Обломок инструмента", data="sos:file_matrix")],
             [Button.inline("🚨 Все SOS-протоколы", data="nav:sos"), Button.inline("⬅️ В главное меню", data="nav:main")]
         ]
-        return text, buttons
-
     elif sos_category == "perforation":
         text = (
             "🚨 <b>ЭКСТРЕННЫЙ ПРОТОКОЛ: ПЕРФОРАЦИЯ СТЕНКИ / ДНА ПОЛОСТИ ЗУБА</b>\n"
@@ -10446,8 +10462,6 @@ def format_emergency_response(sos_category: str) -> Tuple[str, List[Any]]:
             [Button.inline("📐 Оценка феррула (/preserve)", data="preserve:ferrule")],
             [Button.inline("🚨 Все SOS-протоколы", data="nav:sos"), Button.inline("⬅️ В главное меню", data="nav:main")]
         ]
-        return text, buttons
-
     elif sos_category == "file_fracture":
         text = (
             "🚨 <b>ЭКСТРЕННЫЙ ПРОТОКОЛ: СЕПАРАЦИЯ ИНСТРУМЕНТА В КАНАЛЕ (ФАЙЛОЛОМ)</b>\n"
@@ -10465,8 +10479,6 @@ def format_emergency_response(sos_category: str) -> Tuple[str, List[Any]]:
             [Button.inline("💔 Матрица решений по файлам", data="sos:file_matrix")],
             [Button.inline("🚨 Все SOS-протоколы", data="nav:sos"), Button.inline("⬅️ В главное меню", data="nav:main")]
         ]
-        return text, buttons
-
     elif sos_category == "phlegmon_airway":
         text = (
             "🚨 <b>СКОРАЯ 112 НЕМЕДЛЕННО! ЭКСТРЕННАЯ ГОСПИТАЛИЗАЦИЯ В СТАЦИОНАР ЧЛХ!</b>\n"
@@ -10484,7 +10496,16 @@ def format_emergency_response(sos_category: str) -> Tuple[str, List[Any]]:
         buttons = [
             [Button.inline("🚨 Все SOS-протоколы", data="nav:sos"), Button.inline("⬅️ В главное меню", data="nav:main")]
         ]
-        return text, buttons
+
+    if not text:
+        return "", []
+
+    if is_group:
+        username = get_bot_username()
+        group_buttons = [[Button.url("🚨 Все SOS-протоколы в ЛС", f"https://t.me/{username}?start=sos")]] if username else []
+        return text, group_buttons
+
+    return text, buttons
 
     return "", []
 
@@ -13192,6 +13213,27 @@ async def check_bot_mention_trigger(bot_client, event, msg_id, text, sender_firs
     if reply_to_msg_id is None and getattr(event, 'message', None) and getattr(event.message, 'reply_to', None):
         reply_to_msg_id = getattr(event.message.reply_to, 'reply_to_msg_id', None)
 
+    # FAST-PATH: SOS и экстренная реанимация при прямом обращении к боту в группе (Правило MED-06)
+    sos_category = detect_pm_emergency(text)
+    if sos_category and not (text or "").startswith("/"):
+        sos_text, sos_buttons = format_emergency_response(sos_category, is_group=True)
+        if sos_text:
+            try:
+                await bot_client.send_message(
+                    entity=chat_id,
+                    message=sos_text,
+                    reply_to=msg_id,
+                    buttons=sos_buttons if sos_buttons else None,
+                    parse_mode='html'
+                )
+                logger.warning(
+                    "RULE MED-06 SOS Fast-Path triggered in group mention for chat_id=%s, msg_id=%s, type=%s",
+                    chat_id, msg_id, sos_category
+                )
+                return True
+            except Exception as e_sos:
+                logger.error(f"Failed to send SOS response in group mention: {e_sos}")
+
     try:
         # Используем fetch_dynamic_chat_context: base=12, max=40, gap=15 мин.
         # Было: LIMIT 6, плоский формат без структуры ответов.
@@ -14141,14 +14183,16 @@ async def handle_group_direct_ask(bot_client, event, question):
                 status_ctx["media_description"] = active_media_desc
 
             context_for_validator = f"{reply_context_block}\n\n[Вопрос]: {current_query}"
+            last_ask_candidate = ""
 
             for attempt in range(max_retries + 1):
                 current_prompt = prompt
                 if attempt > 0:
-                    current_prompt += f"""\n\n[РЕФЛЕКСИЯ И КОРРЕКЦИЯ ОШИБОК - ПОПЫТКА {attempt}]:
+                    draft_snippet = f"\nОтвергнутый черновик:\n\"\"\"\n{last_ask_candidate}\n\"\"\"\n" if last_ask_candidate else ""
+                    current_prompt += f"""\n\n[РЕФЛЕКСИЯ И КОРРЕКЦИЯ ОШИБОК - ПОПЫТКА {attempt}]:{draft_snippet}
 Твой предыдущий черновик ответа был отклонен автоматическим клиническим валидатором по причине:
 "{last_ask_reason}"
-Устрани указанные дефекты и перепиши ответ строго доказательно. Не выдумывай непроверенные факты, не делай необоснованных категоричных утверждений.
+Устрани указанные дефекты и перепиши ответ строго доказательно по Золотому 3-шаговому стандарту. Не выдумывай непроверенные факты, не делай необоснованных категоричных утверждений.
 """
                 response, error = await generate_gemini_text_async(current_prompt, status_ctx, timeout=120)
 
@@ -14162,6 +14206,9 @@ async def handle_group_direct_ask(bot_client, event, question):
                 if not draft_text:
                     continue
 
+                draft_text = re.sub(r"[😅😂😎😤😏🤣🤡🙄]+", "", draft_text).strip()
+                last_ask_candidate = draft_text
+
                 ask_ok, ask_reason = await check_response_quality(
                     context_for_validator, draft_text,
                     invited=True, reference=wiki_corpus
@@ -14169,20 +14216,10 @@ async def handle_group_direct_ask(bot_client, event, question):
                 last_ask_reason = ask_reason or ""
 
                 if not ask_ok:
-                    reason_lower = last_ask_reason.lower()
-                    _danger_kws = (
-                        "доз", "опасн", "артикул", "ошибк", "риск", "топограф", "токсич",
-                        "противопоказ", "неверн", "ятроген", "недостоверн", "галлюцин"
+                    logger.warning(
+                        "Group ask validator REJECTED draft msg_id=%s (attempt %s/%s): %s",
+                        msg_id, attempt, max_retries, ask_reason
                     )
-                    if not any(w in reason_lower for w in _danger_kws) and any(w in reason_lower for w in ("эмодз", "emoji", "смайл", "несерьез", "нервн")):
-                        logger.info("Group ask validator rejected draft due to emoji/tone (%s). Sanitizing and allowing.", ask_reason)
-                        draft_text = re.sub(r"[😅😂😎😤😏🤣🤡🙄]+", "", draft_text).strip()
-                        ask_ok = True
-                    else:
-                        logger.warning(
-                            "Group ask validator REJECTED draft msg_id=%s (attempt %s/%s): %s",
-                            msg_id, attempt, max_retries, ask_reason
-                        )
 
                 if ask_ok:
                     candidate_reply = draft_text
@@ -14195,14 +14232,20 @@ async def handle_group_direct_ask(bot_client, event, question):
 Ты — опытный врач-стоматолог консилиума "EndoChat".
 Врач спросил: {current_query}
 {reply_context_block}
-Предыдущие варианты ответа не прошли проверку рецензента ("{last_ask_reason}").
-Сформулируй краткий, честный и вежливый ответ коллеге: каких параметров недостаточно для однозначного протокола и какие безопасные ориентиры можно дать.
+Замечание рецензента к предыдущим вариантам ответа: "{last_ask_reason}".
+Сформулируй краткий (2-4 предложения), прямой и безопасный ответ коллеге по Золотому 3-шаговому стандарту:
+1. Базовый инструмент/материал/протокол первого выбора по сути вопроса.
+2. Практический нюанс выполнения у кресла.
+3. Безопасная альтернатива.
+Без лишней воды, без эмодзи, только валидный HTML (<b>, <i>).
 """
                 ebm_ctx = dict(status_ctx) if isinstance(status_ctx, dict) else {}
                 ebm_ctx["kind"] = "group_ask_ebm_fallback"
                 ebm_resp, ebm_err = await generate_gemini_text_async(ebm_prompt, ebm_ctx, timeout=60)
                 if ebm_resp and getattr(ebm_resp, "text", None):
-                    candidate_reply = ebm_resp.text.strip()
+                    cand_fb = ebm_resp.text.strip()
+                    if not _TOXIC_PRACTICE_RE.search(cand_fb):
+                        candidate_reply = cand_fb
                 if not candidate_reply:
                     await bot_client.send_message(
                         entity=chat_id,
