@@ -4435,12 +4435,12 @@ def acquire_single_instance_lock():
         try:
             import ctypes
             kernel32 = ctypes.windll.kernel32
-            mutex_name = "Global\\StomChat_Bot_Instance_Mutex"
+            mutex_name = "Global\\EndoChat_Bot_Instance_Mutex"
             ERROR_ALREADY_EXISTS = 183
             mutex = kernel32.CreateMutexW(None, False, mutex_name)
             last_err = kernel32.GetLastError()
             if last_err == ERROR_ALREADY_EXISTS:
-                logger.warning("Another instance of StomChat bot is already running (Windows Named Mutex exists). Exiting cleanly without crashing SQLite.")
+                logger.warning("Another instance of EndoChat bot is already running (Windows Named Mutex exists). Exiting cleanly without crashing SQLite.")
                 sys.exit(0)
             return mutex
         except Exception as e:
@@ -4452,7 +4452,7 @@ def acquire_single_instance_lock():
         fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
         return lock_file
     except (BlockingIOError, IOError, OSError) as e:
-        logger.warning(f"Another instance of StomChat bot is already running (Linux flock: {e}). Exiting cleanly without crashing SQLite.")
+        logger.warning(f"Another instance of EndoChat bot is already running (Linux flock: {e}). Exiting cleanly without crashing SQLite.")
         sys.exit(0)
     except Exception:
         pass
