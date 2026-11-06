@@ -18,6 +18,7 @@ from telethon import utils as telethon_utils
 import config
 import tg_safety
 import runtime_guard
+import html_safe
 
 runtime_guard.configure_logging()
 logger = logging.getLogger(__name__)
@@ -96,13 +97,13 @@ MY_ID = getattr(config, "ADMIN_ID", _env_int("TG_MY_ID", _env_int("ADMIN_USER_ID
 # assistant.BOT_ID, но он появляется только после init_assistant: до этого
 # момента (и если get_me не прошёл) свои сообщения всё равно надо уметь
 # опознавать, иначе бот отвечает на собственный дайджест.
-FALLBACK_BOT_ID = _env_int("BOT_ID", _env_int("ENDOCHAT_BOT_ID", 8775535374))
+FALLBACK_BOT_ID = _env_int("BOT_ID", _env_int("STOMCHAT_BOT_ID", 7971556097))
 
 # Имя, по которому бота зовут в группе, пока assistant.BOT_USERNAME не
 # отрезолвился. До этого литерал был единственным работающим способом:
 # соседняя проверка f"@{assistant.BOT_ID}" сравнивала текст с числовым id и
 # не срабатывала никогда.
-FALLBACK_BOT_USERNAME = (os.getenv("BOT_USERNAME") or os.getenv("ENDOCHAT_BOT_USERNAME") or "endohelp_bot").lstrip("@").lower()
+FALLBACK_BOT_USERNAME = (os.getenv("BOT_USERNAME") or os.getenv("STOMCHAT_BOT_USERNAME") or "stomchat_bot").lstrip("@").lower()
 MIRROR_CHAT_ID = _env_int("MIRROR_CHAT_ID", 0) or None
 
 HEALTH_CHECK_INTERVAL_SECONDS = _env_int("HEALTH_CHECK_INTERVAL_SECONDS", 300)
@@ -1241,25 +1242,33 @@ async def outbox_worker_task(bot_client):
                 text = item["text"]
                 pm = item.get("parse_mode") or "html"
                 try:
-                    outcome = await tg_safety.send_message(
-                        bot_client,
-                        chat_id,
-                        text,
-                        parse_mode=pm,
-                        timeout=min(25.0, TELEGRAM_REQUEST_TIMEOUT_SECONDS),
-                        op="outbox_worker:send",
-                    )
-                    if outcome.ok:
+                    chunks = list(html_safe.split_html(text, limit=4000)) if pm == "html" else [text[i:i+4000] for i in range(0, len(text), 4000)]
+                    delivery_ok = True
+                    for c_idx, chunk in enumerate(chunks):
+                        outcome = await tg_safety.send_message(
+                            bot_client,
+                            chat_id,
+                            chunk,
+                            parse_mode=pm,
+                            timeout=min(25.0, TELEGRAM_REQUEST_TIMEOUT_SECONDS),
+                            op="outbox_worker:send",
+                        )
+                        if not outcome.ok:
+                            delivery_ok = False
+                            err_str = f"{outcome.kind}:{outcome.reason}: {outcome.error}"
+                            if outcome.kind in (tg_safety.KIND_FLOOD, tg_safety.KIND_TRANSIENT):
+                                logger.warning("Outbox worker transient backoff for msg %d to chat_id=%s: %s (will retry)", oid, chat_id, err_str)
+                            else:
+                                logger.warning("Outbox worker delivery failed for msg %d to chat_id=%s: %s", oid, chat_id, err_str)
+                                await database.mark_outbox_failed(oid, err_str)
+                            break
+                        if c_idx < len(chunks) - 1:
+                            await asyncio.sleep(0.5)
+
+                    if delivery_ok:
                         await database.mark_outbox_sent(oid)
                         await database.save_pm_message(chat_id, "Assistant", text)
-                        logger.info("Outbox worker successfully delivered msg %d to chat_id=%s", oid, chat_id)
-                    else:
-                        err_str = f"{outcome.kind}:{outcome.reason}: {outcome.error}"
-                        if outcome.kind in (tg_safety.KIND_FLOOD, tg_safety.KIND_TRANSIENT):
-                            logger.warning("Outbox worker transient backoff for msg %d to chat_id=%s: %s (will retry)", oid, chat_id, err_str)
-                        else:
-                            logger.warning("Outbox worker delivery failed for msg %d to chat_id=%s: %s", oid, chat_id, err_str)
-                            await database.mark_outbox_failed(oid, err_str)
+                        logger.info("Outbox worker successfully delivered msg %d (%d chunks) to chat_id=%s", oid, len(chunks), chat_id)
                 except Exception as send_err:
                     err_str = str(send_err)
                     logger.warning("Outbox worker delivery failed for msg %d to chat_id=%s: %s", oid, chat_id, err_str)
@@ -1350,7 +1359,7 @@ async def pm_ping_scheduler_task(bot_client):
 #   вызовов из 93 (12%), summarizer.py — 0 из 4. Закрывать не здесь: перевод
 #   отправок на tg_safety — работа лана доставки, а этот файл только объявляет
 #   порог, поэтому долг помечен, а не починен.
-TELETHON_FLOOD_SLEEP_THRESHOLD = max(0, _env_int("ENDOCHAT_FLOOD_SLEEP_THRESHOLD", _env_int("STOMCHAT_FLOOD_SLEEP_THRESHOLD", 20)))
+TELETHON_FLOOD_SLEEP_THRESHOLD = max(0, _env_int("STOMCHAT_FLOOD_SLEEP_THRESHOLD", 20))
 
 # 1. Клиент Юзербота (Твой аккаунт) - только слушает
 client = TelegramClient(
@@ -1459,9 +1468,9 @@ async def patched_send_message(*args, **kwargs):
                         if bot_text:
                             await database.save_message(
                                 msg_id=sent_msg.id,
-                                sender_id=getattr(assistant, "BOT_ID", None) or getattr(config, "BOT_ID", None) or getattr(config, "ENDOCHAT_BOT_ID", None) or FALLBACK_BOT_ID or getattr(sent_msg, 'sender_id', None),
-                                sender_name=getattr(config, "BOT_DISPLAY_NAME", None) or getattr(config, "ENDOCHAT_BOT_USERNAME", FALLBACK_BOT_USERNAME) or "EndoChat",
-                                sender_username=(getattr(assistant, "BOT_USERNAME", None) or getattr(config, "BOT_USERNAME", None) or getattr(config, "ENDOCHAT_BOT_USERNAME", None) or FALLBACK_BOT_USERNAME).lstrip("@"),
+                                sender_id=getattr(assistant, "BOT_ID", None) or getattr(config, "BOT_ID", None) or getattr(config, "STOMCHAT_BOT_ID", None) or FALLBACK_BOT_ID or getattr(sent_msg, 'sender_id', None),
+                                sender_name=getattr(config, "BOT_DISPLAY_NAME", None) or getattr(config, "STOMCHAT_BOT_USERNAME", FALLBACK_BOT_USERNAME) or "StomChat",
+                                sender_username=(getattr(assistant, "BOT_USERNAME", None) or getattr(config, "BOT_USERNAME", None) or getattr(config, "STOMCHAT_BOT_USERNAME", None) or FALLBACK_BOT_USERNAME).lstrip("@"),
                                 text=bot_text,
                                 date=getattr(sent_msg, 'date', None) or datetime.utcnow(),
                                 reply_to_msg_id=reply_to_id,
@@ -1589,8 +1598,12 @@ async def recover_pending_media_analysis():
         messages = [messages]
 
     queued = 0
-    for message in messages:
+    for idx, message in enumerate(messages):
+        target_id = ids[idx] if idx < len(ids) else None
         if not message:
+            if target_id:
+                logger.info("pending media recovery: msg_id=%s not found in Telegram (deleted), marking unavailable", target_id)
+                await database.update_media_description(target_id, MEDIA_UNAVAILABLE_MARK)
             continue
         msg_id = message.id
         media_type_hint = id_to_media_type.get(msg_id)
@@ -1598,7 +1611,8 @@ async def recover_pending_media_analysis():
         # выборку именно потому, что медиа у неё было. Но если Telegram отдал
         # сообщение, судим по нему тем же единым правилом, что и живой путь.
         if not (clinical_media_kind(message) or media_type_hint):
-            logger.info("pending media recovery skipped msg_id=%s: telegram media missing", msg_id)
+            logger.info("pending media recovery skipped msg_id=%s: telegram media missing, marking unavailable", msg_id)
+            await database.update_media_description(msg_id, MEDIA_UNAVAILABLE_MARK)
             continue
         # Проверяем свежесть сообщения: если оно пришло недавно (до 45 мин назад),
         # это живое клиническое обращение, отправленное прямо перед рестартом или во время него.
@@ -1708,7 +1722,7 @@ def bot_mention_names():
     resolved = getattr(assistant, "BOT_USERNAME", None)
     if resolved:
         names.append(resolved.lower())
-    for env_key in ("ENDOCHAT_BOT_USERNAME", "STOMCHAT_BOT_USERNAME"):
+    for env_key in ("STOMCHAT_BOT_USERNAME", "ENDOCHAT_BOT_USERNAME"):
         val = (os.getenv(env_key) or "").lstrip("@").lower()
         if val and val not in names:
             names.append(val)
@@ -2993,7 +3007,7 @@ async def handle_new_message(event):
                 # точное, не по подстроке, поэтому цена ниже, чем у сводки, но
                 # оснований отвечать на слово «опрос» викториной всё равно нет.
                 # 3. Нативные опросы и викторины в группе (через poll_engine) — строго для админов!
-                # Обычные врачи решают кейсы в ЛС бота: @endohelp_bot (/quiz), чтобы не спамить в чат сообщества.
+                # Обычные врачи решают кейсы в ЛС бота: @stomchat_bot (/quiz), чтобы не спамить в чат 750 человек.
                 if cmd_lower in ("/poll", "/кейс"):
                     is_admin_user = False
                     if event.sender_id in get_admin_user_ids():
@@ -3026,7 +3040,7 @@ async def handle_new_message(event):
                     await assistant.handle_term_explainer(bot_client, event, term)
                     return True
 
-                # 5. Эндодонтические калькуляторы и анестезия прямо в группе
+                # 5. Клинические калькуляторы и анестезия прямо в группе
                 cmd_no_mention = strip_bot_mention(cmd)[1].strip()
                 cmd_no_mention_lower = cmd_no_mention.lower()
                 if await chairside_tools.dispatch_chairside_group_command(bot_client, event, cmd_no_mention):
@@ -3131,8 +3145,8 @@ async def handle_new_message(event):
                 except Exception as proto_e:
                     logger.warning("Protocol extractor check failed msg_id=%s: %s", msg_id, proto_e)
 
-            # Standalone-реакция: ставится на интересные клинические сообщения коллег в общем потоке
-            # Не запускаем, если сообщение адресовано боту (это зона ответственности ассистента)
+            # Reaction Engine: выделенный движок реакций (Tier 1 эвристика + Tier 2 in-process)
+            # Снята блокировка 'and text' для поддержки фото и снимков без текста
             bot_uname = (getattr(assistant, "BOT_USERNAME", None) or getattr(config, "BOT_USERNAME", None) or FALLBACK_BOT_USERNAME).lower().lstrip("@")
             clean_text_for_bot_chk = (text or "").lower()
             is_direct_bot_call = bool(
@@ -3156,8 +3170,8 @@ async def handle_new_message(event):
                 )
 
             # Unanswered Question Lifeline (Протокол «Первый ответ») для неактивных чатов:
-            # Если задан клинический вопрос не боту, запускаем 20-минутный спасательный круг (если включен в config)
-            if getattr(config, "ENABLE_QUESTION_LIFELINE", False) and text and not is_direct_bot_call:
+            # Если задан клинический вопрос не боту, запускаем 20-минутный спасательный круг
+            if text and not is_direct_bot_call:
                 if question_lifeline.is_clinical_question_candidate(text=text, has_media=has_media, sender_is_bot=is_any_bot):
                     lifeline_manager.track_question(
                         msg_id=msg_id,
@@ -3345,9 +3359,8 @@ async def handle_private_message(event):
                     if not _PM_BURST_WORKERS.get(chat_id):
                         return
                     await tg_safety.send_message(
-                        bot_client,
-                        chat_id,
-                        "⏳ <i>Принял ваше сообщение! Сейчас завершаю предыдущий клинический разбор и сразу отвечу на это...</i>",
+                        bot_client, chat_id,
+                        "⏳ <i>Принял, обрабатываю ваш предыдущий запрос. Отвечу по порядку...</i>",
                         parse_mode='html',
                         op="send_message:pm_busy_hint",
                     )
@@ -3403,7 +3416,7 @@ async def handle_private_message(event):
                         try:
                             await bot_client.send_message(
                                 entity=chat_id,
-                                message="⏱ <i>Обработка клинического запроса заняла больше обычного из-за высокой нагрузки на нейросетевой каскад. Пожалуйста, повторите запрос или уточните вопрос.</i>",
+                                message="⏱ <i>Коллега, клинический анализ требует углубленных вычислений из-за пиковой нагрузки. Ответ генерируется в фоновом режиме и будет доставлен сразу по готовности.</i>",
                                 parse_mode="html",
                             )
                         except Exception as notify_err:
@@ -4422,12 +4435,12 @@ def acquire_single_instance_lock():
         try:
             import ctypes
             kernel32 = ctypes.windll.kernel32
-            mutex_name = "Global\\EndoChat_Bot_Instance_Mutex"
+            mutex_name = "Global\\StomChat_Bot_Instance_Mutex"
             ERROR_ALREADY_EXISTS = 183
             mutex = kernel32.CreateMutexW(None, False, mutex_name)
             last_err = kernel32.GetLastError()
             if last_err == ERROR_ALREADY_EXISTS:
-                logger.warning("Another instance of EndoChat bot is already running (Windows Named Mutex exists). Exiting cleanly without crashing SQLite.")
+                logger.warning("Another instance of StomChat bot is already running (Windows Named Mutex exists). Exiting cleanly without crashing SQLite.")
                 sys.exit(0)
             return mutex
         except Exception as e:
@@ -4439,7 +4452,7 @@ def acquire_single_instance_lock():
         fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
         return lock_file
     except (BlockingIOError, IOError, OSError) as e:
-        logger.warning(f"Another instance of EndoChat bot is already running (Linux flock: {e}). Exiting cleanly without crashing SQLite.")
+        logger.warning(f"Another instance of StomChat bot is already running (Linux flock: {e}). Exiting cleanly without crashing SQLite.")
         sys.exit(0)
     except Exception:
         pass
