@@ -1541,7 +1541,7 @@ def calculate_anesthesia_instant(text: str) -> str | None:
             "• <b>1 карпула 1.8 мл 0.5%:</b> = <b>9 мг</b> бупивакаина.\n\n"
             "💡 <i>Укажите вес пациента для точного расчета, например: «бупивакаин на 70 кг».</i>"
         )
-    elif re.search(r'\b(?:артикаин\w*|ультракаин\w*|убистезин\w*|септонест\w*|брилокаин\w*)\b', text, re.IGNORECASE):
+    elif re.search(r'\b(?:артикаин|ультракаин|убистезин|септонест|брилокаин)\w*\b', text, re.IGNORECASE):
         return (
             "🧮 <b>Расчет дозировки: Артикаин 4% (1:100 000 / 1:200 000)</b>\n\n"
             "• <b>Норма:</b> 7 мг/кг (взрослые), 5 мг/кг (дети).\n"
@@ -1550,12 +1550,12 @@ def calculate_anesthesia_instant(text: str) -> str | None:
             "• <b>Кардиологический лимит:</b> при сердечно-сосудистой патологии максимум <b>2 карпулы</b> (0.04 мг адреналина)!\n\n"
             "💡 <i>Укажите вес пациента для точного расчета, например: «сколько карпул артикаина на 70 кг» или «артикаин ребенок 20 кг».</i>"
         )
-    has_any_drug = bool(re.search(
-        r'\b(?:артикаин|ультракаин|убистезин|септонест|брилокаин|мепивакаин|скандонест|мепивастезин|мепидонт|изокаин|лидокаин|ксилокаин|ксилонор|бупивакаин|маркаин|анекаин)\w*',
-        text, re.IGNORECASE
-    ))
-    if not has_any_drug:
+    has_drug = bool(re.search(r'\b(?:артикаин|ультракаин|убистезин|септонест|брилокаин|мепивакаин|скандонест|мепивастезин|мепидонт|изокаин|лидокаин|ксилокаин|ксилонор|бупивакаин|маркаин|анекаин)\w*\b', text, re.IGNORECASE))
+    has_weight = anesthesia_calc.parse_weight_from_text(text) is not None
+    has_command = bool(re.match(r'^\s*/(?:anes|anesthesia|calc|кальк)', text, re.IGNORECASE))
+    if not (has_drug or has_weight or has_command):
         return None
+
     return res.error_message
 
 
