@@ -13,7 +13,15 @@ import db_worker
 
 logger = logging.getLogger(__name__)
 # Экспортируем _DB_EXECUTOR из db_worker для обратной совместимости с внешними модулями и тестами
-_DB_EXECUTOR = db_worker._DB_EXECUTOR
+# Экспортируем _DB_EXECUTOR из db_worker для обратной совместимости с внешними модулями и тестами
+def __getattr__(name: str):
+    if name == "_DB_EXECUTOR":
+        return db_worker.get_db_executor()
+    raise AttributeError(f"module '{__name__}' has no attribute '{name}'")
+
+
+def __dir__():
+    return sorted(list(globals().keys()) + ["_DB_EXECUTOR"])
 
 SAVE_RETRY_ATTEMPTS = 3
 SAVE_RETRY_DELAY_SECONDS = 0.25
