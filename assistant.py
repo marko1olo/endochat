@@ -1541,7 +1541,7 @@ def calculate_anesthesia_instant(text: str) -> str | None:
             "• <b>1 карпула 1.8 мл 0.5%:</b> = <b>9 мг</b> бупивакаина.\n\n"
             "💡 <i>Укажите вес пациента для точного расчета, например: «бупивакаин на 70 кг».</i>"
         )
-    elif re.search(r'\b(?:артикаин|ультракаин|убистезин|септонест|брилокаин|анестез\w*|карпул\w*)\b', text, re.IGNORECASE):
+    elif re.search(r'\b(?:артикаин\w*|ультракаин\w*|убистезин\w*|септонест\w*|брилокаин\w*)\b', text, re.IGNORECASE):
         return (
             "🧮 <b>Расчет дозировки: Артикаин 4% (1:100 000 / 1:200 000)</b>\n\n"
             "• <b>Норма:</b> 7 мг/кг (взрослые), 5 мг/кг (дети).\n"
@@ -1550,6 +1550,12 @@ def calculate_anesthesia_instant(text: str) -> str | None:
             "• <b>Кардиологический лимит:</b> при сердечно-сосудистой патологии максимум <b>2 карпулы</b> (0.04 мг адреналина)!\n\n"
             "💡 <i>Укажите вес пациента для точного расчета, например: «сколько карпул артикаина на 70 кг» или «артикаин ребенок 20 кг».</i>"
         )
+    has_any_drug = bool(re.search(
+        r'\b(?:артикаин|ультракаин|убистезин|септонест|брилокаин|мепивакаин|скандонест|мепивастезин|мепидонт|изокаин|лидокаин|ксилокаин|ксилонор|бупивакаин|маркаин|анекаин)\w*',
+        text, re.IGNORECASE
+    ))
+    if not has_any_drug:
+        return None
     return res.error_message
 
 
@@ -11558,7 +11564,7 @@ async def handle_private_message(bot_client, event):
                 "можно открыть и проверить (то, чего нет в базе чата: она заканчивается "
                 "февралём 2026). Синоним — /найди.\n"
                 "• /case — запустить интерактивный клинический симулятор.\n"
-                "• /abort — сбросить текущий клинический симулятор. Синонимы — /exit, /stop.\n\n"
+                "• /abort — сбросить текущий клинический симулятор. Синонимы — /exit, /stop, /cancel.\n\n"
                 # Раздел появился потому, что групповые команды не были описаны
                 # НИГДЕ: ни в меню, ни здесь, ни в промпте. Их шесть, они
                 # работают, и врач о них не знал.
@@ -13096,7 +13102,14 @@ async def handle_private_message(bot_client, event):
 
         async with _safe_typing_action(bot_client, chat_id):
             last_pm_candidate = ""
+            pm_start_time = time.time()
+            PM_MAX_TOTAL_BUDGET = 270.0
             for attempt in range(max_retries + 1):
+                elapsed_pm = time.time() - pm_start_time
+                rem_pm_budget = max(10.0, PM_MAX_TOTAL_BUDGET - elapsed_pm)
+                if attempt > 0 and rem_pm_budget < 35.0:
+                    logger.warning("PM deadline approaching (%.1fs remaining), terminating reflection retries early", rem_pm_budget)
+                    break
                 if attempt > 0:
                     logger.info(
                         "PM retry attempt %s/%s for chat_id=%s. Last rejection: %s",
@@ -13129,7 +13142,8 @@ async def handle_private_message(bot_client, event):
                 pm_image_urls = getattr(media_description, "image_urls", None)
                 if pm_image_urls:
                     status_ctx["image_urls"] = pm_image_urls
-                response, error = await generate_gemini_text_async(current_prompt, status_ctx, timeout=300.0)
+                attempt_timeout = max(10.0, min(rem_pm_budget - 15.0, 75.0))
+                response, error = await generate_gemini_text_async(current_prompt, status_ctx, timeout=attempt_timeout)
 
                 if error:
                     logger.warning("PM Gemini generation error on attempt %s: %s", attempt, error)
@@ -13180,7 +13194,8 @@ async def handle_private_message(bot_client, event):
                 )
                 c_ctx = dict(status_ctx) if isinstance(status_ctx, dict) else {}
                 c_ctx["kind"] = "pm_cautious_ebm"
-                c_resp, c_err = await generate_gemini_text_async(cautious_prompt, c_ctx, timeout=120)
+                c_timeout = max(10.0, min(PM_MAX_TOTAL_BUDGET - (time.time() - pm_start_time) - 5.0, 45.0))
+                c_resp, c_err = await generate_gemini_text_async(cautious_prompt, c_ctx, timeout=c_timeout)
                 if c_resp and getattr(c_resp, "text", None):
                     cand_fb = sanitize_clinical_pm_output(c_resp.text.strip())
                     if not _TOXIC_PRACTICE_RE.search(cand_fb):

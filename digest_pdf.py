@@ -904,19 +904,37 @@ async def generate_digest_pdf(
             from playwright.async_api import async_playwright
 
             async with async_playwright() as p:
-                browser = await p.chromium.launch(
-                    headless=True,
-                    args=[
-                        "--no-sandbox",
-                        "--disable-setuid-sandbox",
-                        "--disable-dev-shm-usage",
-                        "--disable-gpu",
-                        "--disable-software-rasterizer",
-                        "--disable-extensions",
-                        "--disable-background-networking",
-                        "--js-flags=--max-old-space-size=256",
-                    ]
-                )
+                launch_args = [
+                    "--no-sandbox",
+                    "--disable-setuid-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-gpu",
+                    "--disable-software-rasterizer",
+                    "--disable-extensions",
+                    "--disable-background-networking",
+                    "--js-flags=--max-old-space-size=256",
+                ]
+                launch_candidates = [
+                    {},
+                    {"channel": "chrome"},
+                    {"channel": "msedge"},
+                ]
+                browser = None
+                last_launch_err = None
+                for cand in launch_candidates:
+                    try:
+                        browser = await p.chromium.launch(
+                            headless=True,
+                            args=launch_args,
+                            **cand
+                        )
+                        break
+                    except Exception as launch_err:
+                        last_launch_err = launch_err
+                        logger.warning("Chromium launch attempt with %s failed: %s", cand, launch_err)
+
+                if browser is None:
+                    raise RuntimeError(f"Could not launch any chromium browser: {last_launch_err}")
                 try:
                     page = await browser.new_page()
 

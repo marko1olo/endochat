@@ -68,6 +68,10 @@ def connect_db(db_path: Optional[str] = None, timeout: float = 30.0) -> sqlite3.
     - journal_mode = WAL (выставляется один раз на процесс для каждого файла базы)
     """
     path = db_path or get_default_db_path()
+    path_obj = Path(path)
+    if not path_obj.is_absolute():
+        path_obj = Path(__file__).resolve().parent / path_obj
+    path = str(path_obj)
     conn = sqlite3.connect(path, timeout=timeout)
     conn.execute("PRAGMA busy_timeout = 30000")
     conn.execute("PRAGMA synchronous = NORMAL")

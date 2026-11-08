@@ -52,7 +52,7 @@ def check(name, cond, detail=""):
     print(f"  [{'OK  ' if cond else 'FAIL'}] {name}" + (f" -- {detail}" if detail and not cond else ""))
 
 
-SOURCE = io.open("assistant.py", encoding="utf-8").read()
+SOURCE = io.open(os.path.join(_REPO_ROOT, "assistant.py"), encoding="utf-8").read()
 LINES = SOURCE.split("\n")
 TREE = ast.parse(SOURCE)
 
@@ -114,7 +114,7 @@ for name, human in (("handle_private_message", "в личных сообщени
     fn = FUNCS.get(name)
     seg = body_of(fn) if fn else ""
     tail = seg.split("check_response_quality(", 1)[1] if "check_response_quality(" in seg else ""
-    tail = tail[:2500]
+    tail = tail[:4500]
     check(f"отказ {human} сопровождается сообщением",
           "send_message" in tail and ("не прошёл" in tail or "недостаточно" in tail),
           "врач не поймёт, дошёл ли его вопрос вообще")
