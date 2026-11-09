@@ -449,6 +449,23 @@ def mark_case_and_album_rescued(
         logger.warning("Failed to mark case %s (and album) as rescued: %s", msg_id, e)
 
 
+def is_case_already_rescued(db_path: str, msg_id: int, chat_id: Optional[int] = None) -> bool:
+    """Проверяет, помечен ли кейс уже в таблице clinical_rescues."""
+    try:
+        with _open_rescue_db(db_path, timeout=10.0) as conn:
+            ensure_rescue_table(db_path)
+            cursor = conn.cursor()
+            cols = _get_table_columns(conn, "clinical_rescues")
+            if "chat_id" in cols and chat_id is not None:
+                cursor.execute("SELECT 1 FROM clinical_rescues WHERE msg_id = ? AND chat_id = ? LIMIT 1", (msg_id, chat_id))
+            else:
+                cursor.execute("SELECT 1 FROM clinical_rescues WHERE msg_id = ? LIMIT 1", (msg_id,))
+            return cursor.fetchone() is not None
+    except Exception as e:
+        logger.debug("Error checking is_case_already_rescued: %s", e)
+        return False
+
+
 def mark_case_rescued(
     db_path: str,
     msg_id: int,
@@ -524,9 +541,19 @@ async def generate_clinical_rescue_text(candidate: Dict[str, Any], db_path: str,
     has_desc = bool(clean_d)
     has_imgs = bool(multimodal_image_urls)
 
-    # Защита от спама на пустые сообщения без медиа и без описания
+    # Защита от спама на пустые сообщения без медиа и без описания:
+    # Обязательно маркируем как спасено/обработано, иначе демон будет бесконечно
+    # спотыкаться об этот старейший пустой кейс каждые 3 минуты (head-of-line blocking).
     if not has_text and not has_desc and not has_imgs:
         logger.warning("Clinical rescue aborted for msg_id=%s: no text, no vision description, and no images.", msg_id)
+        await asyncio.to_thread(
+            mark_case_and_album_rescued,
+            db_path,
+            msg_id,
+            candidate.get("chat_id"),
+            candidate.get("sender_id"),
+            candidate.get("timestamp") or candidate.get("date")
+        )
         return None
 
     # Дополнительная проверка: если в описании есть не-клинические маркеры — сразу отбой и персистентная блокировка
@@ -694,7 +721,19 @@ async def execute_rescue_for_candidate(
 
     rescue_text = await generate_clinical_rescue_text(candidate, db_path, bot_client=bot_client)
     if not rescue_text:
-        logger.warning("Empty rescue text generated for msg_id=%s (rejected or suppressed)", msg_id)
+        is_marked = await asyncio.to_thread(is_case_already_rescued, db_path, msg_id, chat_id)
+        if not is_marked:
+            logger.warning("Empty rescue text generated for msg_id=%s (marking to prevent head-of-line blocking)", msg_id)
+            await asyncio.to_thread(
+                mark_case_and_album_rescued,
+                db_path,
+                msg_id,
+                chat_id,
+                candidate.get("sender_id"),
+                candidate.get("timestamp") or candidate.get("date")
+            )
+        else:
+            logger.info("Clinical rescue suppressed for msg_id=%s (non-clinical or taboo)", msg_id)
         return False
 
     # Безопасная отправка с защитой от удаленного сообщения (Ghost Reply)

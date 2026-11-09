@@ -198,7 +198,7 @@ def is_group_reply_in_flight(chat_id: int, msg_ids) -> bool:
 # ── Реакции (эмодзи на сообщения) ──────────────────────────────────────────
 # Разрешённый список — только уместные в профессиональном медицинском чате.
 # Чем меньше список, тем проще модели выбрать и меньше шансов получить мусор.
-ALLOWED_REACTIONS = {"👍", "🔥", "🤝", "💯", "❤", "❤️", "🧠", "👏", "💡", "⚡", "😂", "🤣", "🙏", "🫡", "👌"}
+ALLOWED_REACTIONS = {"👍", "🔥", "🤝", "💯", "❤", "❤️", "👏", "💡", "⚡", "😂", "🤣", "🙏", "🫡", "👌"}
 # Кулдаун реакций per-sender: не более 1 реакции на отправителя в 60 сек.
 # Цель — не спамить реакциями при всплеске сообщений от одного врача.
 _REACTION_COOLDOWNS = TTLCache(maxsize=5000, ttl=60)
@@ -1045,7 +1045,7 @@ YES — если вопрос содержит клинический интер
 NO — если это явный отказ от общения, завершение диалога ("спасибо", "ок"), нецензурная брань/троллинг или оффтоп.
 """
         triage_ctx = {"kind": "llama_triage", "thinking_level": "LOW"}
-        response, error = await generate_gemini_text_async(triage_prompt, triage_ctx, timeout=15)
+        response, error = await generate_gemini_text_async(triage_prompt, triage_ctx, timeout=35.0)
         if error or not response or not getattr(response, "text", None):
             last_msg = safe_chain[-1] if safe_chain else ""
             last_text = last_msg.split(": ", 1)[-1].strip().lower() if ": " in last_msg else last_msg.lower()
@@ -4559,7 +4559,7 @@ async def check_llm_triage(context_msgs):
 }}
 """
         triage_ctx = {"kind": "llama_triage", "thinking_level": "LOW"}
-        response, error = await generate_gemini_text_async(triage_prompt, triage_ctx, timeout=15)
+        response, error = await generate_gemini_text_async(triage_prompt, triage_ctx, timeout=35.0)
 
         if error or not response:
             logger.warning(f"Llama triage generation failed: {error}. Defaulting to False to avoid spam.")
@@ -5470,7 +5470,7 @@ async def check_and_trigger_assistant(bot_client, event, msg_id, text, reply_to_
             chain, _, _ = await fetch_dynamic_chat_context(
                 msg_id, reply_to_msg_id, base_limit=12, max_limit=40, event=event
             )
-            context_msgs = chain or [f"{sender_first_name or 'Коллега'}: {text}"]
+            context_msgs = chain or [f"{sender_first_name or 'Доктор'}: {text}"]
         else:
             # 0.1. Категорически игнорируем реплики, явно адресованные другим участникам или админам (@username)
             all_mentions = re.findall(r"@([a-zA-Z0-9_]{3,})", text or "")
@@ -15597,7 +15597,7 @@ async def handle_onboarding_callback(bot_client, event, data_str):
         logger.error("Failed to save onboard memory: %s", save_err)
 
     conf_text = (
-        f"✅ <b>Отлично, коллега!</b>\n\n"
+        f"✅ <b>Специализация зафиксирована</b>\n\n"
         f"Ваша специализация зафиксирована: <b>{chosen_spec}</b>.\n"
         f"Теперь все клинические консультации, дозировки препаратов и разборы снимков "
         f"будут адаптированы под вашу врачебную практику.\n\n"
@@ -18739,11 +18739,32 @@ async def check_and_send_pm_pings(bot_client):
                                 chat_id, wait_seconds,
                             )
                             break
-                        failures = info.get("ping_failures", 0) + 1
+                        _err_str = str(send_err).lower()
+                        if any(term in _err_str for term in (
+                            "could not find the input entity",
+                            "user was deleted",
+                            "the specified user was deleted",
+                            "user is deleted",
+                            "inputuserdeactivated",
+                            "userdeactivated",
+                        )):
+                            logger.warning(
+                                f"DM ping: user {chat_id} entity not found or deleted ({send_err}). Removing from PM pings."
+                            )
+                            drop_pm_ping(chat_id_str)
+                            continue
+
+                        _permanent = any(term in _err_str for term in (
+                            "invalid peer", "peeridsinvalid", "user is blocked",
+                            "userblocked", "user_is_blocked", "bots can't", "bots cannot",
+                            "an invalid peer was used", "chat_write_forbidden", "channel_private",
+                            "userprivacyrestricted", "privacy",
+                        ))
+                        failures = MAX_PING_FAILURES if _permanent else info.get("ping_failures", 0) + 1
                         commit_pm_ping(chat_id_str, ping_failures=failures)
                         logger.warning(
                             f"Failed to deliver DM ping to {chat_id} "
-                            f"(failure {failures}/{MAX_PING_FAILURES}): {send_err}"
+                            f"(failure {failures}/{MAX_PING_FAILURES}{' — PERMANENT BLACKLIST' if _permanent else ''}): {send_err}"
                         )
                         continue
 
@@ -18876,17 +18897,25 @@ async def check_and_send_group_activity_pings(bot_client):
                     break
                 _info = load_state().get("pm_pings", {}).get(chat_id_str, {})
                 _err_str = str(send_err).lower()
-                # Entity not found — юзер совсем не резолвится. Удаляем из пула.
-                if "could not find the input entity" in _err_str:
-                    logger.warning("Group ping: user %s entity not found. Removing from PM pings.", chat_id)
+                # Entity not found / deleted user — юзер не резолвится или удален. Удаляем из пула.
+                if any(term in _err_str for term in (
+                    "could not find the input entity",
+                    "user was deleted",
+                    "the specified user was deleted",
+                    "user is deleted",
+                    "inputuserdeactivated",
+                    "userdeactivated",
+                )):
+                    logger.warning("Group ping: user %s entity not found or deleted (%s). Removing from PM pings.", chat_id, send_err)
                     drop_pm_ping(chat_id_str)
                     continue
                 # Постоянные ошибки: юзер никогда не открывал бота или заблокировал —
                 # сразу выставляем MAX_PING_FAILURES, чтобы исключить навсегда (1 попытка).
                 _permanent = any(x in _err_str for x in (
                     "invalid peer", "peeridsinvalid", "user is blocked",
-                    "userblocked", "bots can't", "bots cannot",
-                    "an invalid peer was used",
+                    "userblocked", "user_is_blocked", "bots can't", "bots cannot",
+                    "an invalid peer was used", "chat_write_forbidden", "channel_private",
+                    "userprivacyrestricted", "privacy",
                 ))
                 failures = MAX_PING_FAILURES if _permanent else _info.get("ping_failures", 0) + 1
                 commit_pm_ping(chat_id_str, ping_failures=failures)
