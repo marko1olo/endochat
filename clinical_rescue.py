@@ -81,7 +81,7 @@ NON_CLINICAL_STOPWORDS = [
 RESCUE_COOLDOWN_SECONDS = 1800  # 30 минут между спасениями
 MAX_RESCUES_PER_DAY = 4
 CHECK_INTERVAL_SECONDS = 180    # проверка раз в 3 минуты
-DEFAULT_RESCUE_MIN_AGE_MINUTES = 60
+DEFAULT_RESCUE_MIN_AGE_MINUTES = 15
 DEFAULT_RESCUE_MAX_AGE_MINUTES = 180
 
 
@@ -124,6 +124,22 @@ def resolve_bot_id(bot_client=None) -> int:
 
     return 0
 
+
+def is_case_already_rescued(db_path: str, msg_id: int, chat_id: Optional[int] = None) -> bool:
+    """Проверяет, помечен ли кейс уже в таблице clinical_rescues."""
+    try:
+        with _open_rescue_db(db_path, timeout=10.0) as conn:
+            ensure_rescue_table(db_path)
+            cursor = conn.cursor()
+            cols = _get_table_columns(conn, "clinical_rescues")
+            if "chat_id" in cols and chat_id is not None:
+                cursor.execute("SELECT 1 FROM clinical_rescues WHERE msg_id = ? AND chat_id = ? LIMIT 1", (msg_id, chat_id))
+            else:
+                cursor.execute("SELECT 1 FROM clinical_rescues WHERE msg_id = ? LIMIT 1", (msg_id,))
+            return cursor.fetchone() is not None
+    except Exception as e:
+        logger.debug("Error checking is_case_already_rescued: %s", e)
+        return False
 
 def ensure_rescue_table(db_path: str):
     """Гарантирует существование таблицы clinical_rescues в БД."""
@@ -449,23 +465,6 @@ def mark_case_and_album_rescued(
         logger.warning("Failed to mark case %s (and album) as rescued: %s", msg_id, e)
 
 
-def is_case_already_rescued(db_path: str, msg_id: int, chat_id: Optional[int] = None) -> bool:
-    """Проверяет, помечен ли кейс уже в таблице clinical_rescues."""
-    try:
-        with _open_rescue_db(db_path, timeout=10.0) as conn:
-            ensure_rescue_table(db_path)
-            cursor = conn.cursor()
-            cols = _get_table_columns(conn, "clinical_rescues")
-            if "chat_id" in cols and chat_id is not None:
-                cursor.execute("SELECT 1 FROM clinical_rescues WHERE msg_id = ? AND chat_id = ? LIMIT 1", (msg_id, chat_id))
-            else:
-                cursor.execute("SELECT 1 FROM clinical_rescues WHERE msg_id = ? LIMIT 1", (msg_id,))
-            return cursor.fetchone() is not None
-    except Exception as e:
-        logger.debug("Error checking is_case_already_rescued: %s", e)
-        return False
-
-
 def mark_case_rescued(
     db_path: str,
     msg_id: int,
@@ -541,19 +540,9 @@ async def generate_clinical_rescue_text(candidate: Dict[str, Any], db_path: str,
     has_desc = bool(clean_d)
     has_imgs = bool(multimodal_image_urls)
 
-    # Защита от спама на пустые сообщения без медиа и без описания:
-    # Обязательно маркируем как спасено/обработано, иначе демон будет бесконечно
-    # спотыкаться об этот старейший пустой кейс каждые 3 минуты (head-of-line blocking).
+    # Защита от спама на пустые сообщения без медиа и без описания
     if not has_text and not has_desc and not has_imgs:
         logger.warning("Clinical rescue aborted for msg_id=%s: no text, no vision description, and no images.", msg_id)
-        await asyncio.to_thread(
-            mark_case_and_album_rescued,
-            db_path,
-            msg_id,
-            candidate.get("chat_id"),
-            candidate.get("sender_id"),
-            candidate.get("timestamp") or candidate.get("date")
-        )
         return None
 
     # Дополнительная проверка: если в описании есть не-клинические маркеры — сразу отбой и персистентная блокировка
@@ -646,7 +635,7 @@ async def generate_clinical_rescue_text(candidate: Dict[str, Any], db_path: str,
             "media_description": clean_d if clean_d else None,
             "has_media": bool(has_media or multimodal_image_urls or clean_d),
         }
-        resp, err = await blocking_tools.generate_gemini_text_async(prompt, status_ctx, timeout=90.0)
+        resp, err = await blocking_tools.generate_gemini_text_async(prompt, status_ctx, timeout=140.0)
         raw_text = getattr(resp, "text", "") or ""
         if raw_text and raw_text.strip():
             clean_resp = raw_text.strip()
@@ -721,19 +710,7 @@ async def execute_rescue_for_candidate(
 
     rescue_text = await generate_clinical_rescue_text(candidate, db_path, bot_client=bot_client)
     if not rescue_text:
-        is_marked = await asyncio.to_thread(is_case_already_rescued, db_path, msg_id, chat_id)
-        if not is_marked:
-            logger.warning("Empty rescue text generated for msg_id=%s (marking to prevent head-of-line blocking)", msg_id)
-            await asyncio.to_thread(
-                mark_case_and_album_rescued,
-                db_path,
-                msg_id,
-                chat_id,
-                candidate.get("sender_id"),
-                candidate.get("timestamp") or candidate.get("date")
-            )
-        else:
-            logger.info("Clinical rescue suppressed for msg_id=%s (non-clinical or taboo)", msg_id)
+        logger.warning("Empty rescue text generated for msg_id=%s (rejected or suppressed)", msg_id)
         return False
 
     # Безопасная отправка с защитой от удаленного сообщения (Ghost Reply)
@@ -866,7 +843,7 @@ async def clinical_rescue_daemon(
     Работает в цикле на протяжении всей жизни бота.
     """
     import config
-    active_db = db_path or getattr(config, "DB_PATH", "endo_bot.db")
+    active_db = db_path or getattr(config, "DB_PATH", "stomat_bot.db")
     active_chat = chat_id or getattr(config, "SOURCE_CHAT_ID", None)
     bot_id = resolve_bot_id(bot_client)
 
