@@ -50,6 +50,12 @@ def run_tests():
     print("\n[1] Эвристический фильтр кандидатов на спасение (is_clinical_rescue_candidate)")
     check("клинический вопрос распознан",
           cr.is_clinical_rescue_candidate("Коллеги, подскажите протокол при обломке в средней трети?", False))
+    check("вопрос по ВНОЛ и пробе Сильвермана распознан (Domain 5)",
+          cr.is_clinical_rescue_candidate("Коллеги, подскажите как определить ВНОЛ по пробе Сильвермана?", False))
+    check("вопрос по линии Паунда распознан (Domain 5)",
+          cr.is_clinical_rescue_candidate("Подскажите, как ориентировать моляры по линии Паунда?", False))
+    check("вопрос по высоте покоя и freeway space распознан (Domain 5)",
+          cr.is_clinical_rescue_candidate("Какой нормальный freeway space и высота покоя при тотале?", False))
     check("сообщение со снимком распознано",
           cr.is_clinical_rescue_candidate("Снимок 46 зуба", True))
     check("смайл со снимком распознан",
@@ -96,8 +102,8 @@ def run_tests():
     now = datetime.datetime.now(datetime.timezone.utc)
     t_2m = (now - datetime.timedelta(minutes=2)).strftime("%Y-%m-%d %H:%M:%S")
     t_5m = (now - datetime.timedelta(minutes=5)).strftime("%Y-%m-%d %H:%M:%S")
-    t_25m = (now - datetime.timedelta(minutes=65)).strftime("%Y-%m-%d %H:%M:%S")
-    t_40m = (now - datetime.timedelta(minutes=70)).strftime("%Y-%m-%d %H:%M:%S")
+    t_25m = (now - datetime.timedelta(minutes=35)).strftime("%Y-%m-%d %H:%M:%S")
+    t_40m = (now - datetime.timedelta(minutes=40)).strftime("%Y-%m-%d %H:%M:%S")
     t_120m = (now - datetime.timedelta(minutes=120)).strftime("%Y-%m-%d %H:%M:%S")
 
     chat_id = -1001999888
@@ -259,7 +265,7 @@ def run_tests():
     print("\n[8] Дедупликация альбомов и серий (Turn / Album Deduplication)")
     album_tmp_dir = tempfile.mkdtemp()
     album_db_path = os.path.join(album_tmp_dir, "test_album_dedup.db")
-    t_24m = (now - datetime.timedelta(minutes=64)).strftime("%Y-%m-%d %H:%M:%S")
+    t_24m = (now - datetime.timedelta(minutes=34)).strftime("%Y-%m-%d %H:%M:%S")
     with sqlite3.connect(album_db_path) as conn:
         conn.execute("""
             CREATE TABLE messages (
@@ -452,7 +458,7 @@ def run_tests():
             )
         """)
         t_now = datetime.datetime.now(datetime.timezone.utc)
-        t_album = (t_now - datetime.timedelta(minutes=65)).strftime("%Y-%m-%d %H:%M:%S")
+        t_album = (t_now - datetime.timedelta(minutes=35)).strftime("%Y-%m-%d %H:%M:%S")
 
         # Кандидат 1 автора с кулдауном (должен быть отброшен)
         conn.execute("INSERT INTO messages (id, msg_id, sender_id, sender_name, text, date, has_media, media_description) "
