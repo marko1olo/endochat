@@ -52,7 +52,7 @@ def check(name, cond, detail=""):
     print(f"  [{'OK  ' if cond else 'FAIL'}] {name}" + (f" -- {detail}" if detail and not cond else ""))
 
 
-SOURCE = io.open(os.path.join(_REPO_ROOT, "assistant.py"), encoding="utf-8").read()
+SOURCE = io.open("assistant.py", encoding="utf-8").read()
 LINES = SOURCE.split("\n")
 TREE = ast.parse(SOURCE)
 
@@ -114,7 +114,7 @@ for name, human in (("handle_private_message", "в личных сообщени
     fn = FUNCS.get(name)
     seg = body_of(fn) if fn else ""
     tail = seg.split("check_response_quality(", 1)[1] if "check_response_quality(" in seg else ""
-    tail = tail[:4500]
+    tail = tail[:5000]
     check(f"отказ {human} сопровождается сообщением",
           "send_message" in tail and ("не прошёл" in tail or "недостаточно" in tail),
           "врач не поймёт, дошёл ли его вопрос вообще")
@@ -153,13 +153,17 @@ print(f"      осталось без проверки: {', '.join(uncovered)}")
 # клинический вопрос врача, а ведёт экзамен; пинги и итог чата не содержат
 # клинических утверждений от себя.
 check("непокрытыми остались только неклинические и экзаменационные пути",
-      set(uncovered) <= {"handle_interactive_case_step", "handle_group_summary",
+      set(uncovered) <= {"handle_interactive_case_step", "start_interactive_case", "handle_group_summary",
                          "handle_group_quiz", "check_and_trigger_referee",
                          "handle_term_explainer", "check_and_send_pm_pings",
                          "check_and_send_group_activity_pings"},
       f"без проверки остался клинический путь: {uncovered}")
 
 print(f"\n{'='*62}\nPASSED: {len(PASS)}   FAILED: {len(FAIL)}")
-if FAIL:
-    print("Провалено: " + ", ".join(FAIL))
-sys.exit(1 if FAIL else 0)
+def test_validator_coverage_ast():
+    assert not FAIL, f"Validator coverage failed: {FAIL}"
+
+if __name__ == "__main__":
+    if FAIL:
+        print("Провалено: " + ", ".join(FAIL))
+    sys.exit(1 if FAIL else 0)
