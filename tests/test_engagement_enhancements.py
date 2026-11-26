@@ -66,15 +66,15 @@ class TestEngagementEnhancements(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(is_clinical_question_candidate(q3))
 
     def test_prompt_persona_integrity(self):
-        """Проверяет, что в промптах assistant.py удален запрет 'притворяться человеком' и внедрен хук для дискуссии."""
+        """Проверяет, что в промптах assistant.py удален запрет 'притворяться человеком' и сохранено мета-правило персоны."""
         import inspect
         source = inspect.getsource(assistant)
 
         # Не должно быть запрета притворяться человеком
         self.assertNotIn("Запрещено притворяться человеком", source)
 
-        # Должен присутствовать клинический хук для дискуссии
-        self.assertIn("КЛИНИЧЕСКИЙ ХУК ДЛЯ ДИСКУССИИ", source)
+        # Должно присутствовать мета-правило персоны
+        self.assertIn("МЕТА-ПРАВИЛО", source)
 
 
 if __name__ == "__main__":
